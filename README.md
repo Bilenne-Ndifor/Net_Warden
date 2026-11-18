@@ -9,18 +9,7 @@ NetWarden is a network monitor and firewall for Windows. It shows what every app
 - **Limit** upload speed, or how much data an app may use per day or month.
 - **Runs in the background.** Once installed, it starts when you sign in, lives in the tray, and keeps enforcing your choices.
 
-Switch between the **Beginner** and **Pro** interfaces at the top right of the window.
-
-## Requirements
-
-- Windows 10 or 11 (administrator rights for the real firewall; demo mode needs none)
-- Python 3.11+ (the installer sets up Python 3.12 automatically if missing)
-- Python packages: `psutil`, `pydivert`, `pystray`, `pillow` (see `requirements.txt`)
-
-```
-git clone https://github.com/Bilenne-Ndifor/Net_Warden.git
-cd Net_Warden
-```
+Switch between the **Beginner** and **Pro** interfaces at the top right of the window. The **Theme** button switches between **Classic 2000**, the default (a Windows 2000 look with grey 3D windows, navy title bars and green-on-black meters), and **Modern dark**. The permission pop-up follows the theme too.
 
 ## Install (recommended)
 
@@ -46,6 +35,30 @@ Only one NetWarden engine ever runs. If the installed copy is running, `run.bat`
 ## Emergency undo
 
 **`cleanup.bat`** (also in the install folder) stops NetWarden, switches block-all mode off, puts back Windows Firewall's previous outbound setting, and removes every NetWarden rule and speed limit. It doesn't need Python.
+
+## Safety nets
+
+NetWarden refuses to quietly do things that could cut your PC off:
+
+- **Risky changes need a second "Do it anyway" click.** This covers:
+  - blocking or slowing a core Windows component (svchost, System, Defender, Windows Update, SmartScreen…);
+  - blocking your router or DNS server;
+  - blocking DNS/DHCP ports for all apps;
+  - blocking huge address ranges (/8 or wider);
+  - throttling the whole PC below 512 kbit/s;
+  - a whole-PC data limit that blocks;
+  - turning off or editing the "Windows essentials" group;
+  - pausing or turning on block-all from a Remote Desktop session.
+- **Timed blocks can't become permanent.** Every pause has a Windows task that removes it at the end time, even if NetWarden crashed or was killed.
+- **"Block IP / host" asks** whether to block for just that app or all apps, and for 1 hour, 1 day, 1 week, or always. The default is the safest choice. Domain blocks forget addresses the domain hasn't used for 6 hours, so CDN servers shared with other sites don't stay blocked.
+- **Block-all only engages once the Windows-essentials allow rules are really in place.** When you turn it off, the normal firewall policy is restored before any allow rule is removed. If restoring fails, the allow rules stay. If NetWarden finds block-all leftovers while its state says "off", it restores normal access.
+- **Emergency reset** is in the Start menu ("NetWarden emergency reset"). It needs no Python and works even if NetWarden is broken.
+
+If NetWarden is deleted without uninstalling while block-all was on, run this in an admin terminal to get the internet back:
+
+```
+netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound
+```
 
 ## Protection modes
 

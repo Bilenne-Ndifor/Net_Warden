@@ -140,87 +140,128 @@ class Agent:
         self.popup = None
         self.popup_ids = []
 
+    def _palette(self):
+        if self.engine.settings.get("theme", "classic") == "classic":
+            return {"classic": True, "frame": "#d4d0c8", "bg": "#d4d0c8", "panel": "#ffffff", "text": "#000000",
+                    "muted": "#3c3c3c", "accent": "#0a246a", "warn": "#7a1010", "title_bg": "#0a246a",
+                    "title_fg": "#ffffff", "font": "Tahoma", "bold": ("Tahoma", 11, "bold"),
+                    "btn": {"block": ("#d4d0c8", "#a00000"), "later": ("#d4d0c8", "#000000"),
+                            "allow": ("#d4d0c8", "#000000")}}
+        return {"classic": False, "frame": LINE, "bg": BG, "panel": PANEL, "text": TEXT, "muted": MUTED,
+                "accent": DOWN, "warn": UP, "title_bg": BG, "title_fg": MUTED, "font": "Segoe UI",
+                "bold": ("Segoe UI Semibold", 12),
+                "btn": {"block": ("#3a1416", "#ffd4d4"), "later": (PANEL, MUTED), "allow": ("#0e3a52", "#d5f0ff")}}
+
     def _show_popup(self, group, apps_waiting):
+        from .safety import is_critical
         tk = self.tk
+        P = self._palette()
+        classic = P["classic"]
         p = group[0]
         pro = p["granularity"] == "address"
         w = tk.Toplevel(self.root)
         self.popup, self.popup_ids = w, [x["id"] for x in group]
         w.overrideredirect(True)
         w.attributes("-topmost", True)
-        w.configure(bg=LINE)
-        body = tk.Frame(w, bg=BG, padx=16, pady=12)
-        body.pack(fill="both", expand=True, padx=1, pady=1)
-        f_small = ("Segoe UI", 9)
-        f_norm = ("Segoe UI", 10)
-        f_bold = ("Segoe UI Semibold", 12)
+        w.configure(bg=P["frame"])
+        outer = tk.Frame(w, bg=P["bg"], bd=2 if classic else 0, relief="raised" if classic else "flat")
+        outer.pack(fill="both", expand=True, padx=0 if classic else 1, pady=0 if classic else 1)
+        F = P["font"]
+        f_small, f_norm = (F, 8 if classic else 9), (F, 9 if classic else 10)
 
-        top = tk.Frame(body, bg=BG)
-        top.pack(fill="x")
-        tk.Label(top, text="●", fg=UP, bg=BG, font=f_small).pack(side="left")
-        tk.Label(top, text=" NetWarden · permission needed", fg=MUTED, bg=BG, font=f_small).pack(side="left")
-        x = tk.Label(top, text="✕", fg=MUTED, bg=BG, font=f_norm, cursor="hand2")
-        x.pack(side="right")
-        x.bind("<Button-1>", lambda e: self._later(group))
-        if apps_waiting > 1:
-            tk.Label(top, text=f"{apps_waiting} apps waiting  ", fg=MUTED, bg=BG, font=f_small).pack(side="right")
+        # title bar
+        if classic:
+            bar = tk.Frame(outer, bg=P["title_bg"])
+            bar.pack(fill="x", padx=2, pady=2)
+            tk.Label(bar, text=" NetWarden - Permission Needed", fg=P["title_fg"], bg=P["title_bg"],
+                     font=(F, 9, "bold")).pack(side="left", pady=2)
+            xb = tk.Button(bar, text="x", font=(F, 7, "bold"), width=2, bd=2, relief="raised", bg="#d4d0c8",
+                           activebackground="#d4d0c8", padx=0, pady=0, command=lambda: self._later(group))
+            xb.pack(side="right", padx=2, pady=2)
+            if apps_waiting > 1:
+                tk.Label(bar, text=f"{apps_waiting} apps waiting ", fg="#dfe8f5", bg=P["title_bg"],
+                         font=f_small).pack(side="right")
+        body = tk.Frame(outer, bg=P["bg"], padx=14, pady=10)
+        body.pack(fill="both", expand=True)
+        if not classic:
+            top = tk.Frame(body, bg=P["bg"])
+            top.pack(fill="x")
+            tk.Label(top, text="●", fg=UP, bg=P["bg"], font=f_small).pack(side="left")
+            tk.Label(top, text=" NetWarden · permission needed", fg=P["muted"], bg=P["bg"], font=f_small).pack(side="left")
+            x = tk.Label(top, text="✕", fg=P["muted"], bg=P["bg"], font=f_norm, cursor="hand2")
+            x.pack(side="right")
+            x.bind("<Button-1>", lambda e: self._later(group))
+            if apps_waiting > 1:
+                tk.Label(top, text=f"{apps_waiting} apps waiting  ", fg=P["muted"], bg=P["bg"], font=f_small).pack(side="right")
 
-        row = tk.Frame(body, bg=BG, pady=10)
+        row = tk.Frame(body, bg=P["bg"], pady=8)
         row.pack(fill="x")
-        av = tk.Canvas(row, width=40, height=40, bg=BG, highlightthickness=0)
+        av = tk.Canvas(row, width=40, height=40, bg=P["bg"], highlightthickness=0)
         col = AV_COLORS[sum(map(ord, p["app_name"])) % len(AV_COLORS)]
-        av.create_rectangle(0, 0, 40, 40, fill=col, outline=col)
-        av.create_text(20, 20, text=_initials(p["app_name"]), fill=BG, font=("Segoe UI Semibold", 13))
+        if classic:
+            av.create_rectangle(0, 0, 39, 39, fill=col, outline="#404040")
+            av.create_line(1, 38, 1, 1, 38, 1, fill="#ffffff")
+        else:
+            av.create_rectangle(0, 0, 40, 40, fill=col, outline=col)
+        av.create_text(20, 20, text=_initials(p["app_name"]), fill="#000000" if classic else BG,
+                       font=(F, 12, "bold"))
         av.pack(side="left", padx=(0, 12))
-        info = tk.Frame(row, bg=BG)
+        info = tk.Frame(row, bg=P["bg"])
         info.pack(side="left", fill="x", expand=True)
-        tk.Label(info, text=p["app_name"], fg=TEXT, bg=BG, font=f_bold, anchor="w").pack(fill="x")
+        tk.Label(info, text=p["app_name"], fg=P["text"], bg=P["bg"], font=P["bold"], anchor="w").pack(fill="x")
         path = p["app"] if len(p["app"]) < 58 else "…" + p["app"][-56:]
-        tk.Label(info, text=path, fg=MUTED, bg=BG, font=("Segoe UI", 8), anchor="w").pack(fill="x")
+        tk.Label(info, text=path, fg=P["muted"], bg=P["bg"], font=(F, 8), anchor="w").pack(fill="x")
 
         if pro:
-            tk.Label(body, text="wants to connect to", fg=MUTED, bg=BG, font=f_norm, anchor="w").pack(fill="x")
-            dest = f"{p.get('host') or p['ip']}"
-            tk.Label(body, text=dest, fg=DOWN, bg=BG, font=("Segoe UI Semibold", 11), anchor="w").pack(fill="x")
+            tk.Label(body, text="wants to connect to", fg=P["muted"], bg=P["bg"], font=f_norm, anchor="w").pack(fill="x")
+            tk.Label(body, text=f"{p.get('host') or p['ip']}", fg=P["accent"], bg=P["bg"],
+                     font=(F, 11 if not classic else 10, "bold"), anchor="w").pack(fill="x")
             tk.Label(body, text=f"{p['ip']} · port {p['port']} · {p['proto'].upper()} · {p['count']} attempt(s)",
-                     fg=MUTED, bg=BG, font=f_small, anchor="w").pack(fill="x")
+                     fg=P["muted"], bg=P["bg"], font=f_small, anchor="w").pack(fill="x")
             if len(group) > 1:
                 tk.Label(body, text=f"+ {len(group) - 1} more address(es) from this app are waiting",
-                         fg=UP, bg=BG, font=f_small, anchor="w").pack(fill="x")
+                         fg=P["warn"], bg=P["bg"], font=f_small, anchor="w").pack(fill="x")
         else:
-            tk.Label(body, text="wants to connect to the internet.", fg=TEXT, bg=BG, font=f_norm,
+            tk.Label(body, text="wants to connect to the internet.", fg=P["text"], bg=P["bg"], font=f_norm,
                      anchor="w").pack(fill="x")
-            tk.Label(body, text="First tried: " + ", ".join(p["dests"][:2]), fg=MUTED, bg=BG, font=f_small,
-                     anchor="w").pack(fill="x")
+            tk.Label(body, text="First tried: " + ", ".join(p["dests"][:2]), fg=P["muted"], bg=P["bg"],
+                     font=f_small, anchor="w", wraplength=380, justify="left").pack(fill="x")
+        if is_critical(p["app"]):
+            tk.Label(body, text="This is part of Windows. Blocking it can break your internet.", fg=P["warn"],
+                     bg=P["bg"], font=(F, 8, "bold"), anchor="w").pack(fill="x", pady=(4, 0))
 
         scope = tk.StringVar(value="address" if pro else "app")
+        opt = dict(fg=P["text"], bg=P["bg"], selectcolor=P["panel"], activebackground=P["bg"],
+                   activeforeground=P["text"], font=f_small, highlightthickness=0)
         if pro:
-            sf = tk.Frame(body, bg=BG, pady=6)
+            sf = tk.Frame(body, bg=P["bg"], pady=6)
             sf.pack(fill="x")
-            tk.Label(sf, text="Apply to:", fg=MUTED, bg=BG, font=f_small).pack(side="left")
-            opts = [("this address", "address"), ("this domain", "domain"), ("whole app", "app")]
-            for label, val in opts:
-                rb = tk.Radiobutton(sf, text=label, value=val, variable=scope, fg=TEXT, bg=BG, selectcolor=PANEL,
-                                    activebackground=BG, activeforeground=TEXT, font=f_small, highlightthickness=0)
+            tk.Label(sf, text="Apply to:", fg=P["muted"], bg=P["bg"], font=f_small).pack(side="left")
+            for label, val in [("this address", "address"), ("this domain", "domain"), ("whole app", "app")]:
+                rb = tk.Radiobutton(sf, text=label, value=val, variable=scope, **opt)
                 if val == "domain" and not p.get("host"):
                     rb.configure(state="disabled")
                 rb.pack(side="left", padx=(6, 0))
         hour = tk.BooleanVar(value=False)
-        tk.Checkbutton(body, text="Only for 1 hour", variable=hour, fg=MUTED, bg=BG, selectcolor=PANEL,
-                       activebackground=BG, activeforeground=TEXT, font=f_small, highlightthickness=0,
-                       anchor="w").pack(fill="x", pady=(2, 8))
+        tk.Checkbutton(body, text="Only for 1 hour", variable=hour, anchor="w", **opt).pack(fill="x", pady=(2, 8))
 
-        btns = tk.Frame(body, bg=BG)
+        btns = tk.Frame(body, bg=P["bg"])
         btns.pack(fill="x")
 
-        def mk(text, bg, fg, cmd):
-            b = tk.Button(btns, text=text, bg=bg, fg=fg, activebackground=bg, activeforeground=fg, relief="flat",
-                          bd=0, highlightthickness=0, padx=16, pady=6, font=("Segoe UI Semibold", 10), cursor="hand2", command=cmd)
-            return b
-        mk("Block", "#3a1416", "#ffd4d4", lambda: self._answer(group, "deny", scope.get(), hour.get())).pack(side="left")
-        mk("Later", PANEL, MUTED, lambda: self._later(group)).pack(side="left", padx=8)
-        mk("Allow", "#0e3a52", "#d5f0ff", lambda: self._answer(group, "allow", scope.get(), hour.get())).pack(side="right")
-        link = tk.Label(body, text="Open NetWarden", fg=DOWN, bg=BG, font=("Segoe UI", 8, "underline"), cursor="hand2")
+        def mk(kind, text, cmd):
+            bg, fg = P["btn"][kind]
+            if classic:
+                return tk.Button(btns, text=text, bg=bg, fg=fg, activebackground=bg, activeforeground=fg,
+                                 relief="raised", bd=2, width=9, font=(F, 9, "bold" if kind == "allow" else "normal"),
+                                 command=cmd)
+            return tk.Button(btns, text=text, bg=bg, fg=fg, activebackground=bg, activeforeground=fg, relief="flat",
+                             bd=0, highlightthickness=0, padx=16, pady=6, font=("Segoe UI Semibold", 10),
+                             cursor="hand2", command=cmd)
+        mk("block", "Block", lambda: self._answer(group, "deny", scope.get(), hour.get())).pack(side="left")
+        mk("later", "Later", lambda: self._later(group)).pack(side="left", padx=8)
+        mk("allow", "Allow", lambda: self._answer(group, "allow", scope.get(), hour.get())).pack(side="right")
+        link = tk.Label(body, text="Open NetWarden", fg="#0000ee" if classic else DOWN, bg=P["bg"],
+                        font=(F, 8, "underline"), cursor="hand2")
         link.pack(anchor="w", pady=(8, 0))
         link.bind("<Button-1>", lambda e: self.open_ui())
 
@@ -229,11 +270,9 @@ class Agent:
         height = w.winfo_reqheight()
         area = _work_area()
         if area:
-            x0 = area[2] - width - 16
-            y0 = area[3] - height - 16
+            x0, y0 = area[2] - width - 16, area[3] - height - 16
         else:
-            x0 = w.winfo_screenwidth() - width - 24
-            y0 = w.winfo_screenheight() - height - 72
+            x0, y0 = w.winfo_screenwidth() - width - 24, w.winfo_screenheight() - height - 72
         w.geometry(f"{width}x{height}+{x0}+{y0}")
         try:
             import winsound
@@ -245,11 +284,22 @@ class Agent:
         ld = self.engine.lockdown
         minutes = 60 if (one_hour and action == "allow") else None
         p = group[0]
-        try:
+        from .safety import NeedsConfirm
+
+        def do(force):
             if scope == "app" or p["granularity"] == "app":
-                ld.add_decision(p["app"], p["app_name"], "app", None, action, minutes)
+                ld.add_decision(p["app"], p["app_name"], "app", None, action, minutes, force)
             else:
-                ld.answer(p["id"], action, scope, minutes)
+                ld.answer(p["id"], action, scope, minutes, force)
+        try:
+            try:
+                do(False)
+            except NeedsConfirm as e:
+                from tkinter import messagebox
+                if not messagebox.askyesno("NetWarden - are you sure?", "\n\n".join(e.reasons) +
+                                           "\n\nBlock it anyway?", icon="warning", parent=self.popup):
+                    return
+                do(True)
         except Exception as e:  # noqa: BLE001
             log.warning("answer failed: %s", e)
         self.engine._enforce_soon()

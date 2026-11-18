@@ -81,9 +81,15 @@ class DnsMap:
         if not host or not ips:
             return
         with self.lock:
+            if len(self.ip2host) > 60000:  # long-running background process: keep memory bounded
+                self.ip2host.clear()
+                self.host2ips.clear()
             for ip in ips:
                 self.ip2host[ip] = host
-                self.host2ips.setdefault(host, set()).add(ip)
+                hs = self.host2ips.setdefault(host, set())
+                hs.add(ip)
+                if len(hs) > 64:  # keep only a recent handful per host (CDNs rotate addresses)
+                    hs.pop()
             self.recent.appendleft({"t": time.time(), "host": host, "ips": list(ips)[:8]})
 
     def host_for(self, ip: str) -> str | None:
@@ -94,6 +100,8 @@ class DnsMap:
             return None
         if ip in self._rdns:
             return self._rdns[ip]
+        if len(self._rdns) > 20000:
+            self._rdns.clear()
         if ip not in self._rdns_pending and len(self._rdns_pending) < 16:
             self._rdns_pending.add(ip)
             threading.Thread(target=self._reverse, args=(ip,), daemon=True).start()

@@ -104,6 +104,57 @@ class WindowsFirewall:
         return set_connection_audit(enable)
 
 
+    # ---- failsafe: a timed block (pause) must end even if NetWarden is killed or crashes
+    def schedule_expiry(self, tag: str, ts: float):
+        """Register a one-shot Windows task (as SYSTEM) that deletes NetWarden_<tag>_* rules at ts."""
+        import base64
+        import datetime as _dt
+        task = f"Expire_{tag}"
+        inner = (f"Get-NetFirewallRule -DisplayName '{RULE_PREFIX}{tag}_*' -ErrorAction SilentlyContinue | "
+                 f"Remove-NetFirewallRule; Unregister-ScheduledTask -TaskName '{task}' -TaskPath '\\NetWarden\\' "
+                 f"-Confirm:$false")
+        enc = base64.b64encode(inner.encode("utf-16-le")).decode()
+        when = _dt.datetime.fromtimestamp(ts + 5).strftime("%Y-%m-%dT%H:%M:%S")
+        script = (
+            "$sys = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18'))"
+            ".Translate([System.Security.Principal.NTAccount]).Value; "
+            f"$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive "
+            f"-WindowStyle Hidden -EncodedCommand {enc}'; "
+            f"$t = New-ScheduledTaskTrigger -Once -At ([datetime]::ParseExact('{when}', 'yyyy-MM-ddTHH:mm:ss', "
+            "[Globalization.CultureInfo]::InvariantCulture)); "
+            "$p = New-ScheduledTaskPrincipal -UserId $sys -LogonType ServiceAccount -RunLevel Highest; "
+            "$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; "
+            f"Register-ScheduledTask -TaskName '{task}' -TaskPath '\\NetWarden\\' -Action $a -Trigger $t "
+            "-Principal $p -Settings $s -Force | Out-Null; 'ok'")
+        return _ps(script)
+
+    def cancel_expiry(self, tag: str):
+        return _ps(f"Unregister-ScheduledTask -TaskName 'Expire_{tag}' -TaskPath '\\NetWarden\\' "
+                   f"-Confirm:$false -ErrorAction SilentlyContinue; 'ok'")
+
+    def list_expiry(self) -> set[str]:
+        ok, out = _ps("Get-ScheduledTask -TaskPath '\\NetWarden\\' -ErrorAction SilentlyContinue | "
+                      "ForEach-Object { $_.TaskName }")
+        return {l.strip()[7:] for l in out.splitlines() if l.strip().startswith("Expire_")} if ok else set()
+
+
+def get_critical_ips() -> list[str]:
+    """Default gateways + DNS servers: blocking these cuts the whole PC off."""
+    ok, out = _ps("Get-NetIPConfiguration -ErrorAction SilentlyContinue | ForEach-Object { "
+                  "$_.IPv4DefaultGateway.NextHop; $_.IPv6DefaultGateway.NextHop; $_.DNSServer.ServerAddresses }")
+    import ipaddress
+    res = []
+    for line in out.splitlines():
+        v = line.strip().split("%")[0]
+        try:
+            a = ipaddress.ip_address(v)
+            if not a.is_unspecified and not a.is_loopback:
+                res.append(str(a))
+        except ValueError:
+            continue
+    return res
+
+
 AUDIT_GUID = "{0CCE9226-69AE-11D9-BED3-505054503030}"  # Filtering Platform Connection (locale-independent)
 
 
@@ -528,6 +579,9 @@ class RealSource:
 
     def per_app_bytes(self) -> bool:
         return self.sniffer is not None
+
+    def critical_ips(self):
+        return get_critical_ips()
 
     def drain_attempts(self):
         return self.watcher.drain() if self.watcher else []

@@ -12,6 +12,8 @@ permitted. Detection: Windows logs every blocked connection (Security event 5157
 """
 from __future__ import annotations
 
+import fnmatch
+import glob
 import ipaddress
 import os
 import threading
@@ -19,6 +21,7 @@ import time
 import uuid
 from collections import deque
 
+from .safety import NeedsConfirm, is_critical
 from .util import JsonStore, classify_target, ip_in_targets
 
 MODES = ("off", "ask", "allowlist")
@@ -28,15 +31,50 @@ MAX_PENDING = 300
 
 def _sys(path: str) -> str:
     root = os.environ.get("SystemRoot") or r"C:\Windows"
-    return path.replace("%SystemRoot%", root)
+    pd = os.environ.get("ProgramData") or r"C:\ProgramData"
+    pf = os.environ.get("ProgramFiles") or r"C:\Program Files"
+    return path.replace("%SystemRoot%", root).replace("%ProgramData%", pd).replace("%ProgramFiles%", pf)
+
+
+ESSENTIALS_VERSION = 2
+# path may contain * (expanded on every check: Defender moves to a new versioned folder when it updates)
+ESSENTIAL_APPS = [
+    (r"%SystemRoot%\System32\svchost.exe", "Windows services (svchost)"),
+    ("System", "Windows kernel (System)"),
+    (r"%ProgramData%\Microsoft\Windows Defender\Platform\*\MsMpEng.exe", "Microsoft Defender"),
+    (r"%ProgramData%\Microsoft\Windows Defender\Platform\*\MpCmdRun.exe", "Defender updates"),
+    (r"%ProgramData%\Microsoft\Windows Defender\Platform\*\NisSrv.exe", "Defender network protection"),
+    (r"%ProgramFiles%\Windows Defender\MsMpEng.exe", "Microsoft Defender (old location)"),
+    (r"%ProgramFiles%\Windows Defender\MpCmdRun.exe", "Defender updates (old location)"),
+    (r"%SystemRoot%\System32\MoUsoCoreWorker.exe", "Windows Update worker"),
+    (r"%SystemRoot%\System32\SIHClient.exe", "Windows Update healing"),
+    (r"%SystemRoot%\System32\smartscreen.exe", "SmartScreen"),
+]
+
+
+def _essential_apps():
+    return [{"path": _sys(p), "name": n} for p, n in ESSENTIAL_APPS]
+
+
+def _exists(path: str) -> bool:
+    """Skip programs that were uninstalled (a rule for a missing file is useless and may fail)."""
+    if os.name != "nt" or path == "System":
+        return True
+    return os.path.isfile(path)
+
+
+def expand(path: str) -> list[str]:
+    """A group entry -> real program paths (wildcards resolved; missing files kept as-is)."""
+    if "*" not in path:
+        return [path]
+    return sorted(glob.glob(path)) or []
 
 
 def default_groups():
     return [
         {"id": "essentials", "name": "Windows essentials", "builtin": True, "enabled": True,
          "note": "Core Windows networking (DNS, DHCP, time, updates). Turning this off can break Windows networking.",
-         "apps": [{"path": _sys(r"%SystemRoot%\System32\svchost.exe"), "name": "Windows services (svchost)"},
-                  {"path": "System", "name": "Windows kernel (System)"}]},
+         "apps": _essential_apps()},
         {"id": "allowed", "name": "My allowed apps", "builtin": True, "enabled": True,
          "note": "Apps you always allow. In 'Only allowed apps' mode these are the only apps that can connect.",
          "apps": []},
@@ -56,7 +94,8 @@ def is_noise(ip: str) -> bool:
 class Lockdown:
     def __init__(self, path, dns, resolver, log):
         self.store = JsonStore(path, {"mode": "off", "groups": default_groups(), "decisions": [],
-                                      "saved_profiles": None, "audit_by_us": False})
+                                      "saved_profiles": None, "audit_by_us": False,
+                                      "essentials_version": ESSENTIALS_VERSION})
         self.d = self.store.data
         self.dns = dns
         self.resolver = resolver
@@ -72,6 +111,15 @@ class Lockdown:
         for g in default_groups():
             if g["id"] not in ids:
                 self.d["groups"].append(g)
+        # older files: add the newer essential entries (Defender, Windows Update, SmartScreen)
+        if self.d.get("essentials_version", 1) < ESSENTIALS_VERSION:
+            ess = next(g for g in self.d["groups"] if g["id"] == "essentials")
+            have = {a["path"].lower() for a in ess["apps"]}
+            for a in _essential_apps():
+                if a["path"].lower() not in have:
+                    ess["apps"].append(a)
+            self.d["essentials_version"] = ESSENTIALS_VERSION
+            self.store.save()
         self._expire()
 
     @property
@@ -85,7 +133,9 @@ class Lockdown:
     def _groups_allow(self, exe: str) -> bool:
         e = (exe or "").lower()
         for g in self.d["groups"]:
-            if g.get("enabled") and any(a["path"].lower() == e for a in g["apps"]):
+            if g.get("enabled") and any(a["path"].lower() == e or ("*" in a["path"] and
+                                                                    fnmatch.fnmatch(e, a["path"].lower()))
+                                        for a in g["apps"]):
                 return True
         return False
 
@@ -191,7 +241,7 @@ class Lockdown:
             return sorted(self.pending.values(), key=lambda p: p["first"])
 
     # ------------------------------------------------------------------ answers
-    def answer(self, pid: str, action: str, scope: str, minutes=None) -> dict:
+    def answer(self, pid: str, action: str, scope: str, minutes=None, force=False) -> dict:
         """Turn a pending request into a decision. scope: app | address | domain."""
         if action not in ("allow", "deny"):
             raise ValueError("action must be allow or deny")
@@ -209,11 +259,14 @@ class Lockdown:
                 remote = host
             elif scope != "app":
                 raise ValueError("scope must be app, address or domain")
-            dec = self.add_decision(p["app"], p["app_name"], scope, remote, action, minutes)
+            dec = self.add_decision(p["app"], p["app_name"], scope, remote, action, minutes, force)
             self._drop_covered()
             return dec
 
-    def add_decision(self, app, app_name, scope, remote, action, minutes=None) -> dict:
+    def add_decision(self, app, app_name, scope, remote, action, minutes=None, force=False) -> dict:
+        if action == "deny" and scope == "app" and is_critical(app) and not force:
+            raise NeedsConfirm([f"{app_name} is a core Windows component. Blocking it in block-all mode can "
+                                f"break the internet for every app or stop security updates."])
         if scope != "app":
             kind, val = classify_target(remote)
             if scope == "address" and kind == "domain":
@@ -291,6 +344,15 @@ class Lockdown:
     def update_group(self, gid, data):
         with self.lock:
             g = self.group(gid)
+            if gid == "essentials" and not data.get("force"):
+                if data.get("enabled") is False:
+                    raise NeedsConfirm(["Turning off 'Windows essentials' blocks Windows' own networking in "
+                                        "block-all mode: name lookups (DNS), network setup (DHCP), Windows Update "
+                                        "and Defender updates. Most apps will stop working."])
+                if data.get("remove_app"):
+                    raise NeedsConfirm([f"{data['remove_app']} is part of Windows' own networking or security. "
+                                        f"Removing it can break the internet or stop security updates in "
+                                        f"block-all mode."])
             if "name" in data and not g.get("builtin"):
                 g["name"] = str(data["name"]).strip() or g["name"]
             if "enabled" in data:
@@ -299,7 +361,8 @@ class Lockdown:
                 path = str(data["add_app"]).strip().strip('"')
                 if not path:
                     raise ValueError("app path is empty")
-                if path.lower() != "system" and not (len(path) > 3 and path[1] == ":" and path.lower().endswith(".exe")):
+                if path.lower() != "system" and not (len(path) > 3 and path[1] == ":" and path.lower().endswith(".exe")
+                                                     and "?" not in path):
                     raise ValueError("use the full path of a program, e.g. C:\\Program Files\\App\\app.exe")
                 if not any(a["path"].lower() == path.lower() for a in g["apps"]):
                     g["apps"].append({"path": path, "name": data.get("app_name") or path.split("\\")[-1]})
@@ -330,13 +393,18 @@ class Lockdown:
             if not g.get("enabled"):
                 continue
             for a in g["apps"]:
-                p = a["path"]
-                if p.lower() in seen_apps:
-                    continue
-                seen_apps.add(p.lower())
-                out.append({"dir": "out", "action": "allow", "program": p, "remoteip_list": []})
+                for p in expand(a["path"]):
+                    if p.lower() in seen_apps or not _exists(p):
+                        continue
+                    seen_apps.add(p.lower())
+                    spec = {"dir": "out", "action": "allow", "program": p, "remoteip_list": []}
+                    if g["id"] == "essentials":
+                        spec["essential"] = True  # block-all only engages once these are in place
+                    out.append(spec)
         for x in self.d["decisions"]:
             if self.mode == "allowlist" and x["action"] == "allow":
+                continue
+            if not _exists(x["app"]):
                 continue
             if x["action"] == "allow" and x["scope"] == "app" and x["app"].lower() in seen_apps:
                 continue

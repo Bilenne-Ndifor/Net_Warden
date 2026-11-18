@@ -216,6 +216,9 @@ class SimSource:
         q, self.attempt_q = self.attempt_q, []
         return q
 
+    def critical_ips(self):
+        return ["192.168.1.1", "1.1.1.1"]
+
     def kill(self, laddr, lport, raddr, rport):
         for f in self.flows:
             if f["lport"] == lport and f["rip"] == raddr and f["rport"] == rport:
@@ -275,6 +278,18 @@ class SimFirewall:
 
     def set_audit(self, enable):
         return True, "ok"
+
+    def schedule_expiry(self, tag, ts):
+        self.src.expiry_tasks = getattr(self.src, "expiry_tasks", {})
+        self.src.expiry_tasks[tag] = ts
+        return True, "ok"
+
+    def cancel_expiry(self, tag):
+        getattr(self.src, "expiry_tasks", {}).pop(tag, None)
+        return True, "ok"
+
+    def list_expiry(self):
+        return set(getattr(self.src, "expiry_tasks", {}))
 
 
 class SimQos:

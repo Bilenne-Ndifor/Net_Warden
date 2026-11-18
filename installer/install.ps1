@@ -30,6 +30,15 @@ Write-Host "  Installs to $Dest and starts automatically when you sign in." -For
 $User = (Get-CimInstance Win32_ComputerSystem).UserName
 if (-not $User) { $User = "$env:USERDOMAIN\$env:USERNAME" }
 Say "  For user: $User" DarkGray
+try {
+    $admins = @(Get-LocalGroupMember -SID "S-1-5-32-544" -ErrorAction Stop | ForEach-Object { $_.Name })
+    if ($admins -and -not ($admins -contains $User)) {
+        Say "  WARNING: $User is not an administrator. NetWarden would start without admin rights and could only" Yellow
+        Say "  watch traffic (no blocking, no block-all). Sign in with an administrator account to install it." Yellow
+        $ans = Read-Host "  Continue anyway? (y/N)"
+        if ($ans -notmatch '^[yY]') { exit 1 }
+    }
+} catch { }
 
 # ---------------------------------------------------------------- python
 Step "Looking for Python 3.10 or newer"
@@ -156,6 +165,14 @@ foreach ($lnkPath in @($startMenu, $desktop)) {
     $lnk.Description = "Open NetWarden"
     $lnk.Save()
 }
+# Emergency reset: works without Python (turns block-all off, removes every NetWarden rule)
+$reset = $shell.CreateShortcut((Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\NetWarden emergency reset.lnk"))
+$reset.TargetPath = Join-Path $env:SystemRoot "System32\cmd.exe"
+$reset.Arguments = "/c `"$Dest\cleanup.bat`""
+$reset.WorkingDirectory = $Dest
+$reset.IconLocation = (Join-Path $env:SystemRoot "System32\shell32.dll") + ",77"
+$reset.Description = "Turn NetWarden block-all off and remove all of its firewall rules"
+$reset.Save()
 
 # ---------------------------------------------------------------- Apps & features
 Step "Registering in Apps & features"

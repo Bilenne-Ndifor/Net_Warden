@@ -7,6 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .safety import NeedsConfirm
 from .util import WEB_DIR
 
 
@@ -97,7 +98,7 @@ def make_server(engine, port: int, token: str, on_quit, on_open=None):
                 if p == "/api/rules":
                     return self._json(engine.add_rule(b))
                 if p == "/api/pause":
-                    return self._json(engine.pause_all(b.get("minutes")))
+                    return self._json(engine.pause_all(b.get("minutes"), bool(b.get("force"))))
                 if p == "/api/resume":
                     engine.resume_all()
                     return self._json({"ok": True})
@@ -124,24 +125,26 @@ def make_server(engine, port: int, token: str, on_quit, on_open=None):
                     threading.Thread(target=on_quit, daemon=True).start()
                     return
                 return self._json({"error": "not found"}, 404)
+            except NeedsConfirm as e:
+                return self._json({"error": "needs confirmation", "confirm": e.reasons}, 409)
             except (ValueError, KeyError) as e:
                 return self._json({"error": str(e).strip("'")}, 400)
 
         def _lockdown_post(self, what, b, ld):
             if what == "mode":
-                engine.set_lockdown_mode(b.get("mode"))
+                engine.set_lockdown_mode(b.get("mode"), bool(b.get("force")))
                 return {"mode": ld.mode}
             if what == "answer":
-                return ld.answer(b["id"], b["action"], b.get("scope", "app"), b.get("minutes"))
+                return ld.answer(b["id"], b["action"], b.get("scope", "app"), b.get("minutes"), bool(b.get("force")))
             if what == "answer_app":  # answer every pending request of one app at once
                 return ld.add_decision(b["app"], b.get("app_name") or b["app"], "app", None,
-                                       b["action"], b.get("minutes"))
+                                       b["action"], b.get("minutes"), bool(b.get("force")))
             if what == "snooze":
                 return {"ok": ld.snooze(b["id"])}
             if what == "decision":
                 return ld.add_decision(b["app"], b.get("app_name") or b["app"].split("\\")[-1],
                                        b.get("scope", "app"), b.get("remote"), b.get("action", "allow"),
-                                       b.get("minutes"))
+                                       b.get("minutes"), bool(b.get("force")))
             if what == "group":
                 return ld.add_group(b.get("name"))
             if what == "firewall_on":
@@ -158,11 +161,15 @@ def make_server(engine, port: int, token: str, on_quit, on_open=None):
                     g = engine.lockdown.update_group(p.rsplit("/", 1)[1], self._body())
                     engine._enforce_soon()
                     return self._json(g)
+                except NeedsConfirm as e:
+                    return self._json({"error": "needs confirmation", "confirm": e.reasons}, 409)
                 except (KeyError, ValueError) as e:
                     return self._json({"error": str(e).strip("'")}, 400)
             if p.startswith("/api/rules/"):
                 try:
                     return self._json(engine.update_rule(p.rsplit("/", 1)[1], self._body()))
+                except NeedsConfirm as e:
+                    return self._json({"error": "needs confirmation", "confirm": e.reasons}, 409)
                 except KeyError:
                     return self._json({"error": "rule not found"}, 404)
                 except ValueError as e:

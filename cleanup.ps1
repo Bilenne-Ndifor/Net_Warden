@@ -38,6 +38,7 @@ if ($j) {
 }
 
 Get-NetFirewallRule -DisplayName "NetWarden_*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Get-ScheduledTask -TaskPath "\NetWarden\" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
 Get-NetQosPolicy -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "NetWarden_*" } |
     Remove-NetQosPolicy -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue
 

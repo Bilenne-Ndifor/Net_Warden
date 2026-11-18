@@ -35,6 +35,14 @@ Start-Sleep -Milliseconds 800
 # 3. task, shortcuts, Apps & features entry
 Unregister-ScheduledTask -TaskName $AppName -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\NetWarden.lnk") -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\NetWarden emergency reset.lnk") -Force -ErrorAction SilentlyContinue
+# the packet-capture driver service, only if it is NetWarden's own copy (other tools such as
+# GoodbyeDPI / zapret also use WinDivert and must keep working)
+$drv = Get-CimInstance Win32_SystemDriver -Filter "Name='WinDivert'" -ErrorAction SilentlyContinue
+if ($drv -and $drv.PathName -like "*\NetWarden\*") {
+    & sc.exe stop WinDivert | Out-Null
+    & sc.exe delete WinDivert | Out-Null
+}
 Remove-Item (Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "NetWarden.lnk") -Force -ErrorAction SilentlyContinue
 Remove-Item "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\NetWarden" -Recurse -Force -ErrorAction SilentlyContinue
 

@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 2 4 7v8c0 7.5 5.1 13.1 12 15 6.9-1.9 12-7.5 12-15V7z' fill='%2338bdf8'/><path d='M10 17h3l2-5 3 9 2-4h2' stroke='%230b0f14' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <link rel="stylesheet" href="app.css">
 </head>
-<body>
+<body class="theme-classic">
 <header class="topbar">
   <div class="brand">
     <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><path d="M16 2 4 7v8c0 7.5 5.1 13.1 12 15 6.9-1.9 12-7.5 12-15V7z" fill="var(--down)"/><path d="M10 17h3l2-5 3 9 2-4h2" stroke="var(--bg)" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -15,6 +15,7 @@
   </div>
   <div id="status-pill" class="pill">Connecting…</div>
   <div class="spacer"></div>
+  <button class="btn sm" data-act="theme" id="theme-btn" title="Switch the look of NetWarden">Theme</button>
   <div class="seg" role="tablist" aria-label="Interface mode">
     <button data-act="mode" data-mode="beginner" id="mode-beginner">Beginner</button>
     <button data-act="mode" data-mode="pro" id="mode-pro">Pro</button>

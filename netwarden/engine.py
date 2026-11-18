@@ -13,12 +13,14 @@ from collections import deque
 from . import rules as R
 from .lockdown import MODES as LOCK_MODES
 from .lockdown import Lockdown
+from .safety import NeedsConfirm, NetInfo, in_remote_session, is_critical, rule_risks
 from .monitor import Monitor
 from .util import (DATA_DIR, IS_WINDOWS, RULE_PREFIX, JsonStore, classify_target, fmt_bytes,
                    parse_ports, spec_matches)
 
 DEFAULT_SETTINGS = {
     "ui_mode": "beginner",
+    "theme": "classic",             # "classic" (Windows 2000 look, default) or "modern"
     "kill_on_block": True,          # reset open TCP connections when a block starts
     "instant_pause": True,          # use WinDivert to drop packets instantly during Pause internet
     "keep_rules_on_exit": False,    # leave firewall blocks in place when NetWarden closes
@@ -55,22 +57,29 @@ class DomainResolver:
                 threading.Thread(target=self._resolve, args=(domain,), daemon=True).start()
         if hit is None and not learned:
             return None
-        return (hit[1] if hit else set()) | learned
+        return (set(hit[1]) if hit else set()) | learned
+
+    IP_TTL = 6 * 3600  # forget addresses a domain hasn't used for 6 h (CDNs reuse them for other sites)
 
     def _resolve(self, domain):
-        ips = set()
+        now = time.time()
+        found = set()
         base = domain[2:] if domain.startswith("*.") else domain
-        for host in {base, "www." + base} if domain.startswith("*.") else {base}:
+        for host in ({base, "www." + base} if domain.startswith("*.") else {base}):
             try:
                 for fam, *_rest, sa in socket.getaddrinfo(host, None):
                     if fam in (socket.AF_INET, socket.AF_INET6):
-                        ips.add(sa[0].split("%")[0])
+                        found.add(sa[0].split("%")[0])
             except Exception:
                 pass
         with self.lock:
-            old = self.cache.get(domain, (0, set()))[1]
-            # keep previously seen IPs: CDNs rotate addresses and we want to keep them blocked
-            self.cache[domain] = (time.time(), (old | ips) if len(old) < 400 else ips)
+            seen = dict(self.cache.get(domain, (0, {}))[1])
+            for ip in found:
+                seen[ip] = now
+            seen = {ip: ts for ip, ts in seen.items() if now - ts < self.IP_TTL}
+            if len(seen) > 400:
+                seen = dict(sorted(seen.items(), key=lambda kv: -kv[1])[:400])
+            self.cache[domain] = (now, seen)
             self.pending.discard(domain)
 
 
@@ -103,6 +112,9 @@ class Engine:
         self.resolver = DomainResolver(self.src.dns)
         self.lockdown = Lockdown(data / "permissions.json", self.src.dns, self.resolver, self.log)
         self._profiles_checked = 0.0
+        self.netinfo = NetInfo(self.src.critical_ips)
+        self.failsafe: set[str] = set()   # rule ids with a Windows "end this pause" task registered
+        self._ld_wait_logged = False
         self.applied: dict[str, str] = {}  # firewall/QoS entry name -> kind ('fw' | 'qos')
         self.failed: dict[str, float] = {}
         self.status: dict[str, dict] = {}
@@ -136,6 +148,16 @@ class Engine:
                 self.applied[n] = "fw"
             for n in self.qos.list_names():
                 self.applied[n] = "qos"
+            # Leftover block-all entries while our state says "off" (e.g. permissions.json was lost):
+            # make sure the firewall's outbound policy gets restored instead of staying on Block.
+            if self.lockdown.mode == "off" and any(n.startswith(LOCK_PREFIX) for n in self.applied):
+                self.lockdown.d["policy_set_by_us"] = True
+                self.log("warn", "Found block-all leftovers from an earlier run — restoring normal access.")
+            try:
+                self.failsafe = set(self.fw.list_expiry())
+            except Exception:
+                self.failsafe = set()
+        threading.Thread(target=self.netinfo.get, daemon=True).start()
         self.running = True
         threading.Thread(target=self._monitor_loop, daemon=True, name="monitor").start()
         threading.Thread(target=self._enforce_loop, daemon=True, name="enforce").start()
@@ -361,11 +383,15 @@ class Engine:
             self.dropper.close()
             self.dropper = None
 
-        # leaving block-all: restore the normal outbound policy BEFORE removing allow rules
+        # leaving block-all: restore the normal outbound policy BEFORE removing allow rules.
+        # If restoring fails, keep the allow rules: never leave the PC on Block without them.
+        restore_ok = True
         if self.lockdown.mode == "off":
-            self._lockdown_policy()
+            restore_ok = self._lockdown_policy()
         # remove what is no longer wanted (names hash their content, so a change = new name)
         for name in list(self.applied):
+            if not restore_ok and name.startswith(LOCK_PREFIX):
+                continue
             if name not in desired:
                 kind = self.applied[name]
                 ok, out = (self.fw if kind == "fw" else self.qos).remove(name)
@@ -393,9 +419,20 @@ class Engine:
             if rid in status:
                 status[rid].update(state="error", detail=err)
         self.status = status
-        # entering / staying in block-all: allow rules are in place, now default-deny everything else
+        # entering / staying in block-all: only switch the default to Block once EVERY allow rule
+        # (Windows essentials first of all) is really in place.
         if self.lockdown.mode != "off":
-            self._lockdown_policy()
+            missing = [n for n, (_k, sp, _r) in desired.items()
+                       if n.startswith(LOCK_PREFIX) and sp.get("essential") and n not in self.applied]
+            if missing:
+                if not self._ld_wait_logged:
+                    self._ld_wait_logged = True
+                    self.log("warn", f"Block-all is waiting: {len(missing)} Windows-essentials allow rule(s) could not "
+                                     f"be added yet, so nothing is blocked by default.")
+            else:
+                self._ld_wait_logged = False
+                self._lockdown_policy()
+        self._sync_failsafe(t)
 
         if newly_blocked and self.settings.get("kill_on_block", True):
             self._kill_matching(newly_blocked)
@@ -451,11 +488,12 @@ class Engine:
                     ld.save()
                     ld.policy_ok = False
                     self.log("allow", "Block-all mode is off — apps can connect normally again.")
-                else:
-                    self.log("error", f"Could not restore the firewall policy: {out[-200:]}")
-            return
+                    return True
+                self.log("error", f"Could not restore the firewall policy: {out[-200:]}")
+                return False
+            return True
         if ld.policy_ok and t - self._profiles_checked < 60:
-            return
+            return True
         self._profiles_checked = t
         profiles = self.fw.get_profiles()
         warnings = [f"Windows Firewall is turned off for {n} networks — NetWarden can't block anything there."
@@ -469,20 +507,60 @@ class Engine:
         ld.save()
         if profiles and all(p["out"] == "Block" for p in profiles.values()):
             ld.policy_ok = True
-            return
+            return True
         ld.d["policy_set_by_us"] = True
         ld.save()
         ok, out = self.fw.set_outbound({"Domain": "Block", "Private": "Block", "Public": "Block"})
         if ok:
             if not ld.policy_ok:
                 self.log("rule", "Block-all mode is on — only allowed apps can connect.")
+                self._kill_unallowed()
             ld.policy_ok = True
         else:
             self.log("error", f"Could not switch the firewall to block-all: {out[-200:]}")
+        return ok
 
-    def set_lockdown_mode(self, mode):
+    def _kill_unallowed(self):
+        """Firewall rules only stop NEW connections: close open ones of apps that aren't allowed."""
+        if not self.settings.get("kill_on_block", True):
+            return
+        n = 0
+        for c in self.monitor.live_tcp():
+            if c["status"] != "ESTABLISHED" or c.get("v6"):
+                continue
+            a = self.monitor.apps.get(c["app"])
+            if a and a.exe and self.lockdown.classify(a.exe, c["rip"]) not in ("allowed",):
+                n += bool(self.killer(c["lip"], c["lport"], c["rip"], c["rport"]))
+        if n:
+            self.log("info", f"Closed {n} open connection(s) of apps that aren't allowed.")
+
+    def _sync_failsafe(self, t):
+        """Timed blocks (pauses) get a Windows task that removes them at the end time, so a
+        pause can never become permanent if NetWarden crashes or is killed."""
+        want = {}
+        for r in self.rules:
+            if r["type"] == "block" and r.get("expires_at") and r.get("enabled", True):
+                if any(n.startswith(f"{RULE_PREFIX}{r['id']}_") for n in self.applied):
+                    want[r["id"]] = r["expires_at"]
+        for rid, ts in want.items():
+            if rid not in self.failsafe:
+                ok, out = self.fw.schedule_expiry(rid, ts)
+                if ok:
+                    self.failsafe.add(rid)
+                else:
+                    self.log("warn", f"Couldn't register the safety timer for a pause: {out[-160:]}")
+                    self.failsafe.add(rid)  # don't retry every second; logged once
+        for rid in list(self.failsafe):
+            if rid not in want:
+                self.fw.cancel_expiry(rid)
+                self.failsafe.discard(rid)
+
+    def set_lockdown_mode(self, mode, force=False):
         if mode not in LOCK_MODES:
             raise ValueError("mode must be off, ask or allowlist")
+        if mode != "off" and not force and in_remote_session():
+            raise NeedsConfirm(["You're connected through Remote Desktop. Block-all could cut this session "
+                                "off and you might not be able to reconnect."])
         if not self.admin:
             raise ValueError("Block-all mode needs Administrator rights")
         ld = self.lockdown
@@ -506,9 +584,20 @@ class Engine:
             raise ValueError(out[-200:] or "failed")
 
     # ------------------------------------------------------------------ API actions
+    def _check(self, r, force):
+        risks = rule_risks(r, self.netinfo.get())
+        if r.get("pause_all") and in_remote_session():
+            risks.append("You're connected through Remote Desktop: pausing the internet will cut this session "
+                         "and you won't be able to reconnect until the pause ends.")
+        if risks and not force:
+            raise NeedsConfirm(risks)
+
     def add_rule(self, data) -> dict:
+        data = dict(data)
+        force = bool(data.pop("force", False))
         with self.lock:
             r = R.normalize(data)
+            self._check(r, force)
             if r.get("pause_all"):
                 self.rules[:] = [x for x in self.rules if not x.get("pause_all")]
             self.rules.append(r)
@@ -524,7 +613,11 @@ class Engine:
                     merged = dict(r)
                     if "name" not in data and r.get("name") == R.describe(r):
                         merged.pop("name", None)  # keep auto-generated names in sync
+                    data = dict(data)
+                    force = bool(data.pop("force", False))
                     nr = R.normalize(data, merged)
+                    if nr.get("enabled", True):
+                        self._check(nr, force)
                     self.rules[i] = nr
                     self.cap_state.pop(rid, None)
                     self.rules_store.save()
@@ -560,10 +653,10 @@ class Engine:
             self._enforce_soon()
         return n
 
-    def pause_all(self, minutes):
+    def pause_all(self, minutes, force=False):
         exp = time.time() + float(minutes) * 60 if minutes else None
         return self.add_rule({"type": "block", "pause_all": True, "direction": "both",
-                              "name": "Internet paused", "expires_at": exp})
+                              "name": "Internet paused", "expires_at": exp, "force": force})
 
     def resume_all(self):
         with self.lock:
@@ -595,6 +688,8 @@ class Engine:
     def set_settings(self, data):
         if "ui_mode" in data and data["ui_mode"] != self.settings.get("ui_mode"):
             self.lockdown.pending.clear()  # requests are per app (Beginner) or per address (Pro)
+        if "theme" in data and data["theme"] not in ("classic", "modern"):
+            raise ValueError("theme must be classic or modern")
         for k, v in data.items():
             if k in DEFAULT_SETTINGS:
                 self.settings[k] = type(DEFAULT_SETTINGS[k])(v)
@@ -624,6 +719,7 @@ class Engine:
         ld = self.lockdown
         for a in apps:
             a["perm"] = ld.app_status(a["exe"])
+            a["critical"] = is_critical(a["exe"] or a["name"])
         sysu = self.usage.data["system"]
         paused = next((r for r in rules if r.get("pause_all")), None)
         s = {

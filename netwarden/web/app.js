@@ -22,12 +22,36 @@ async function api(method, path, body) {
   });
   let j = {};
   try { j = await r.json(); } catch (_) { /* empty */ }
+  if (r.status === 409 && j.confirm) {
+    // risky change (could cut the PC off): ask, then resend with force
+    if (await confirmRisk(j.confirm)) return api(method, path, { ...(body || {}), force: true });
+    const e = new Error("Cancelled — nothing was changed"); e.cancelled = true; throw e;
+  }
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
 }
 async function act(promise, okMsg, opts) {
   try { const r = await promise; if (okMsg) toast(okMsg, opts); poll(true); return r; }
-  catch (e) { toast(e.message, { err: true }); throw e; }
+  catch (e) { toast(e.message, { err: !e.cancelled }); poll(true); throw e; }
+}
+function confirmRisk(reasons) {
+  return new Promise((resolve) => {
+    const layer = document.createElement("div");
+    layer.className = "modal-bg top";
+    layer.innerHTML = `<div class="modal"><header><h2>⚠ This could break your internet</h2></header><div class="body">
+      <ul class="risks">${reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+      <p class="muted" style="font-size:12.5px">If something goes wrong, open NetWarden and undo it, or run “NetWarden emergency reset” from the Start menu (cleanup.bat).</p></div>
+      <footer><button class="btn" data-x="no">Cancel</button><button class="btn danger" data-x="yes">Do it anyway</button></footer></div>`;
+    document.body.appendChild(layer);
+    layer.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-x]");
+      if (!b) return;
+      e.stopPropagation();
+      layer.remove();
+      resolve(b.dataset.x === "yes");
+    });
+    layer.querySelector('[data-x="no"]').focus();
+  });
 }
 
 // ------------------------------------------------------------------ format
@@ -82,20 +106,24 @@ function drawChart(canvas, hist) {
   const g = canvas.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
+  const cs = getComputedStyle(document.body);
+  const cv = (n, d) => (cs.getPropertyValue(n) || "").trim() || d;
+  const C = { grid: cv("--chart-grid", "#1f2b38"), text: cv("--chart-text", "#5c6b7c"), down: cv("--chart-down", "#38bdf8"),
+              up: cv("--chart-up", "#f5a524"), fill: cv("--chart-fill", "rgba(56,189,248,.35)") };
   const pts = hist || [];
   const max = Math.max(1024, ...pts.map((p) => Math.max(p[1], p[2]))) * 1.15;
   const top = 16, bot = h - 4;
-  g.strokeStyle = "#1f2b38"; g.lineWidth = 1;
+  g.strokeStyle = C.grid; g.lineWidth = 1;
   for (let i = 0; i <= 3; i++) { const y = top + ((bot - top) * i) / 3; g.beginPath(); g.moveTo(0, y + 0.5); g.lineTo(w, y + 0.5); g.stroke(); }
-  g.fillStyle = "#5c6b7c"; g.font = "11px Consolas, monospace"; g.fillText(fmtR(max / 1.15), 4, 11);
+  g.fillStyle = C.text; g.font = "11px 'Lucida Console', Consolas, monospace"; g.fillText(fmtR(max / 1.15), 4, 11);
   if (pts.length < 2) return;
   const X = (i) => (i / (pts.length - 1)) * w, Y = (v) => bot - (v / max) * (bot - top);
   const grad = g.createLinearGradient(0, top, 0, bot);
-  grad.addColorStop(0, "rgba(56,189,248,.35)"); grad.addColorStop(1, "rgba(56,189,248,0)");
+  grad.addColorStop(0, C.fill); grad.addColorStop(1, "rgba(0,0,0,0)");
   g.beginPath(); g.moveTo(0, bot); pts.forEach((p, i) => g.lineTo(X(i), Y(p[1]))); g.lineTo(w, bot); g.closePath();
   g.fillStyle = grad; g.fill();
-  g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(X(i), Y(p[1])) : g.moveTo(0, Y(p[1])))); g.strokeStyle = "#38bdf8"; g.lineWidth = 1.8; g.stroke();
-  g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(X(i), Y(p[2])) : g.moveTo(0, Y(p[2])))); g.strokeStyle = "#f5a524"; g.lineWidth = 1.5; g.stroke();
+  g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(X(i), Y(p[1])) : g.moveTo(0, Y(p[1])))); g.strokeStyle = C.down; g.lineWidth = 1.8; g.stroke();
+  g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(X(i), Y(p[2])) : g.moveTo(0, Y(p[2])))); g.strokeStyle = C.up; g.lineWidth = 1.5; g.stroke();
 }
 
 // ------------------------------------------------------------------ rule helpers
@@ -162,6 +190,23 @@ document.addEventListener("click", (e) => {
 });
 const appByKey = (k) => (S.data?.apps || []).find((a) => a.key === k);
 
+const THEMES = { classic: "Classic 2000", modern: "Modern dark" };
+function applyTheme(t) {
+  t = THEMES[t] ? t : "classic";
+  S.theme = t;
+  document.body.classList.toggle("theme-classic", t === "classic");
+  document.body.classList.toggle("theme-modern", t === "modern");
+  const b = $("#theme-btn"); if (b) b.textContent = "Theme: " + THEMES[t];
+  try { localStorage.setItem("nw_theme", t); } catch (_) { /* ignore */ }
+  const c = $("#chart"); if (c && S.data) drawChart(c, S.data.history);
+}
+try { applyTheme(localStorage.getItem("nw_theme") || "classic"); } catch (_) { applyTheme("classic"); }
+H.theme = () => {
+  const next = S.theme === "classic" ? "modern" : "classic";
+  applyTheme(next);
+  S.themeLocked = Date.now();
+  api("POST", "/api/settings", { theme: next }).catch(() => {});
+};
 H.mode = (d) => { S.mode = d.mode; api("POST", "/api/settings", { ui_mode: d.mode }).catch(() => {}); render(); };
 H.tab = (d) => { S.tab = d.tab; render(); };
 H.pauseAll = (d) => act(api("POST", "/api/pause", { minutes: d.min ? +d.min : null }),
@@ -247,8 +292,34 @@ H.delRule = (d) => {
 H.toggleRule = (d, el) => act(api("PATCH", `/api/rules/${d.id}`, { enabled: el.checked !== undefined ? el.checked : d.on !== "1" }));
 H.showIdle = () => { S.showIdle = !S.showIdle; render(); };
 H.kill = (d) => act(api("POST", "/api/kill", { lip: d.lip, lport: +d.lport, rip: d.rip, rport: +d.rport }), `Closed connection to ${d.rip}:${d.rport}`);
-H.blockIp = (d) => act(api("POST", "/api/rules", { type: "block", remote: d.ip, direction: "both" }), `Blocked ${d.ip}`);
-H.blockHost = (d) => act(api("POST", "/api/rules", { type: "block", remote: d.host, direction: "both" }), `Blocked ${d.host} (all its addresses)`);
+H.blockIp = (d) => blockTarget(d.ip, d.exe, d.name);
+H.blockHost = (d) => blockTarget(d.host, d.exe, d.name);
+function blockTarget(target, exe, name) {
+  const isDomain = /[a-z]/i.test(target) && !target.includes(":");
+  let scope = exe ? "app" : "all", dur = 60;
+  modal(`<header><h2>Block ${esc(target)}</h2></header><div class="body">
+    ${isDomain ? `<p class="muted" style="font-size:12.5px">A domain is blocked by its IP addresses. Big services share servers (CDNs), so blocking it for all apps can also block other sites. Blocking only for one app, or only for a while, is safer.</p>` : ""}
+    <div class="field"><label>For</label><div class="choice-grid">
+      ${exe ? `<button class="choice ${scope === "app" ? "on" : ""}" data-g="scope" data-v="app">Only ${esc(name || "this app")}</button>` : ""}
+      <button class="choice ${scope === "all" ? "on" : ""}" data-g="scope" data-v="all">All apps</button></div></div>
+    <div class="field"><label>How long</label><div class="choice-grid">
+      ${[[60, "1 hour"], [1440, "1 day"], [10080, "1 week"], [0, "Always"]].map(([v, l]) => `<button class="choice ${v === dur ? "on" : ""}" data-g="dur" data-v="${v}">${l}</button>`).join("")}</div>
+      <div class="hint">Timed blocks end by themselves — even if NetWarden is closed.</div></div>
+    </div><footer><button class="btn" data-act="close">Cancel</button><button class="btn danger" id="bt-go">Block</button></footer>`, {
+    onMount(m) {
+      m.querySelectorAll(".choice").forEach((b) => (b.onclick = () => {
+        m.querySelectorAll(`.choice[data-g="${b.dataset.g}"]`).forEach((x) => x.classList.toggle("on", x === b));
+        if (b.dataset.g === "scope") scope = b.dataset.v; else dur = +b.dataset.v;
+      }));
+      m.querySelector("#bt-go").onclick = () => {
+        closeModal();
+        const body = { type: "block", remote: target, direction: "both", expires_at: dur ? Date.now() / 1000 + dur * 60 : null };
+        if (scope === "app" && exe) { body.app = exe; body.app_name = name; }
+        act(api("POST", "/api/rules", body), `Blocked ${target}${scope === "app" ? " for " + (name || "the app") : ""}${dur ? " for " + (dur >= 1440 ? dur / 1440 + " day(s)" : "1 hour") : ""}`).catch(() => {});
+      };
+    },
+  });
+}
 H.newRule = (d) => ruleEditor(d.prefill ? JSON.parse(d.prefill) : {});
 H.editRule = (d) => ruleEditor((S.data?.rules || []).find((x) => x.id === d.id) || {});
 H.appDetail = (d) => appDetail(d.key);
@@ -517,7 +588,7 @@ function beginnerShell() {
     <div id="b-banner"></div>
     <div id="b-requests"></div>
     <section class="card"><h2>Protection</h2><p class="sub">Choose how strict NetWarden is. You can change this any time, also from the tray icon near the clock.</p><div id="b-modes"></div></section>
-    <section class="card hidden" id="b-allowed-card"><div style="display:flex;align-items:center;gap:10px"><div style="flex:1"><h2>Allowed apps</h2><p class="sub">These apps can connect while block-all is on.</p></div><button class="btn primary" data-act="addAllowed">Choose apps…</button></div><div id="b-allowed"></div></section>
+    <section class="card hidden" id="b-allowed-card"><h2>Allowed apps</h2><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><p class="sub" style="flex:1;margin:0">These apps can connect while block-all is on.</p><button class="btn primary" data-act="addAllowed">Choose apps…</button></div><div id="b-allowed"></div></section>
     <section class="card hero">
       <div class="stat"><div class="label"><span class="dot down"></span>Downloading now</div><div class="value" id="b-down"></div></div>
       <div class="stat"><div class="label"><span class="dot up"></span>Uploading now</div><div class="value" id="b-up"></div></div>
@@ -591,6 +662,7 @@ function beginnerUpdate() {
     }
     const blocked = r.block || r.pause;
     if (a.perm) chips.unshift(permChip(a.perm));
+    if (a.critical) chips.push('<span class="chip idle" title="Part of Windows itself — blocking it can break your internet">Windows</span>');
     const ldBlocked = ["blocked", "pending", "denied"].includes(a.perm);
     if (ldBlocked) what = "Blocked by block-all mode";
     const w = Math.round(((a.rate_down + a.rate_up) / maxRate) * 100);
@@ -778,7 +850,7 @@ function proConns(body, d) {
       <td class="num faint">${c.lport}</td><td class="num">${esc(c.rip)}:${c.rport}</td><td>${esc(c.host || "")}</td><td class="faint">${esc(c.status)}</td>
       <td class="r num down">${fmtR(c.rate_down)}</td><td class="r num up">${fmtR(c.rate_up)}</td><td class="r num">${fmtB(c.down)} <span class="faint">/</span> ${fmtB(c.up)}</td>
       <td class="acts">${c.proto === "tcp" && !c.v6 && c.status === "ESTABLISHED" ? `<button class="btn sm" data-act="kill" data-lip="${esc(c.lip)}" data-lport="${c.lport}" data-rip="${esc(c.rip)}" data-rport="${c.rport}" title="Reset this TCP connection">Kill</button>` : ""}
-        <button class="btn sm danger" data-act="blockIp" data-ip="${esc(c.rip)}">Block IP</button>${c.host ? `<button class="btn sm danger" data-act="blockHost" data-host="${esc(c.host)}">Block host</button>` : ""}
+        <button class="btn sm danger" data-act="blockIp" data-ip="${esc(c.rip)}" data-exe="${esc(c.exe || "")}" data-name="${esc(c.friendly)}">Block IP</button>${c.host ? `<button class="btn sm danger" data-act="blockHost" data-host="${esc(c.host)}" data-exe="${esc(c.exe || "")}" data-name="${esc(c.friendly)}">Block host</button>` : ""}
         <button class="btn sm" data-act="newRule" data-prefill='${esc(JSON.stringify({ app: c.exe, remote: [c.host || c.rip], protocol: c.proto, ports: String(c.rport) }))}'>Rule…</button></td></tr>`).join("")
       || '<tr><td colspan="10" class="empty">No connections match</td></tr>'}</tbody></table></div>`);
 }
@@ -866,11 +938,14 @@ function proSettings(body, d) {
 function render(force) {
   if (!S.data) return;
   if (!S.mode) S.mode = S.data.settings.ui_mode === "pro" ? "pro" : "beginner";
+  const st = S.data.settings.theme || "classic";
+  if (st !== S.theme && !(S.themeLocked && Date.now() - S.themeLocked < 3000)) applyTheme(st);
   renderHeader();
   const key = S.mode + ":" + (S.mode === "pro" ? S.tab : "");
   const app = $("#app");
   if (S.shellKey !== key) {
     app.innerHTML = S.mode === "pro" ? proShell() : beginnerShell();
+    app.classList.toggle("pro", S.mode === "pro");
     S.shellKey = key;
     if (S.mode === "pro") bindProInputs();
     force = true;
@@ -902,5 +977,6 @@ async function poll(now) {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(poll, 1000);
 }
+window.addEventListener("unhandledrejection", (e) => { e.preventDefault(); });
 window.addEventListener("resize", () => { const c = $("#chart"); if (c && S.data) drawChart(c, S.data.history); });
 poll();
