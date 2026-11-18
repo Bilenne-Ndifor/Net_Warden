@@ -262,8 +262,13 @@ class Sniffer(threading.Thread):
         self.running = True
         self.packets = 0
         self.error = None
-        self.w = pydivert.WinDivert("tcp or udp", flags=pydivert.Flag.SNIFF)
-        self.w.open()
+        # Loopback traffic (incl. NetWarden's own UI) is dropped in the driver, not in Python.
+        try:
+            self.w = pydivert.WinDivert("(tcp or udp) and not loopback", flags=pydivert.Flag.SNIFF)
+            self.w.open()
+        except Exception:
+            self.w = pydivert.WinDivert("tcp or udp", flags=pydivert.Flag.SNIFF)
+            self.w.open()
         for param, val in ((pydivert.Param.QUEUE_LEN, 8192), (pydivert.Param.QUEUE_TIME, 2048)):
             try:
                 self.w.set_param(param, val)
@@ -271,6 +276,91 @@ class Sniffer(threading.Thread):
                 pass
 
     def run(self):
+        try:
+            recv = self._fast_recv()
+        except Exception:  # noqa: BLE001  (pydivert internals changed: use its public API)
+            recv = None
+        if recv is not None:
+            self._run_fast(recv)
+        else:
+            self._run_pydivert()
+
+    # ---- fast path: one reused buffer, header fields read with struct (no Packet objects).
+    # A busy download is 50-100k packets/s, so per-packet Python work must be minimal.
+    def _fast_recv(self):
+        from pydivert import windivert_dll
+        from pydivert.windivert_dll.structs import WinDivertAddress
+        handle = self.w._handle
+        if handle is None:
+            return None
+        size = 65535
+        buf = bytearray(size)
+        cbuf = (ctypes.c_char * size).from_buffer(buf)
+        addr = WinDivertAddress()
+        rlen = ctypes.c_uint(0)
+        f = windivert_dll.WinDivertRecv
+        ref_len, ref_addr = ctypes.byref(rlen), ctypes.byref(addr)
+
+        def recv():
+            f(handle, cbuf, size, ref_len, ref_addr)  # raises OSError on failure / close
+            return buf, rlen.value, addr.Outbound
+        return recv
+
+    def _run_fast(self, recv):
+        unpack = struct.unpack_from
+        while self.running:
+            try:
+                b, n, outbound = recv()
+            except Exception as e:  # noqa: BLE001
+                if not self.running:
+                    break
+                self.error = str(e)
+                time.sleep(0.05)
+                continue
+            try:
+                self.packets += 1
+                v = b[0] >> 4
+                if v == 4:
+                    off = (b[0] & 15) * 4
+                    proto = b[9]
+                    src, dst = bytes(b[12:16]), bytes(b[16:20])
+                elif v == 6:
+                    proto, off = b[6], 40
+                    while proto in (0, 43, 60, 44) and off + 8 <= n:  # skip IPv6 extension headers
+                        proto, off = b[off], off + (8 if proto == 44 else (b[off + 1] + 1) * 8)
+                    src, dst = bytes(b[8:24]), bytes(b[24:40])
+                else:
+                    continue
+                if proto == 6:
+                    p = "tcp"
+                elif proto == 17:
+                    p = "udp"
+                else:
+                    continue
+                sport, dport = unpack(">HH", b, off)
+                cur = self.cur
+                if outbound:
+                    k = (p, sport, dst, dport)
+                    c = cur.get(k)
+                    if c is None:
+                        cur[k] = [n, 0]
+                    else:
+                        c[0] += n
+                else:
+                    k = (p, dport, src, sport)
+                    c = cur.get(k)
+                    if c is None:
+                        cur[k] = [0, n]
+                    else:
+                        c[1] += n
+                    if sport == 53 and p == "udp":
+                        r = parse_dns_response(bytes(b[off + 8:n]))
+                        if r:
+                            self.dns.learn(*r)
+            except Exception:
+                continue
+
+    def _run_pydivert(self):
         while self.running:
             try:
                 p = self.w.recv()  # blocking is fastest; stop() closes the handle to unblock
@@ -312,8 +402,30 @@ class Sniffer(threading.Thread):
                 continue
 
     def drain(self) -> dict:
+        """{(proto, lport, remote_ip_str, rport): [up, down]}. The fast path keys flows by raw
+        address bytes; they are converted to strings here, once per flow instead of per packet."""
         d, self.cur = self.cur, {}
-        return d
+        out = {}
+        names: dict[bytes, str] = {}
+        for (p, lport, rip, rport), v in d.items():
+            if isinstance(rip, bytes):
+                s = names.get(rip)
+                if s is None:
+                    try:
+                        s = names[rip] = socket.inet_ntop(socket.AF_INET if len(rip) == 4 else socket.AF_INET6, rip)
+                    except (OSError, ValueError):
+                        continue
+                rip = s
+                if is_loopback(rip):
+                    continue
+            k = (p, lport, rip, rport)
+            o = out.get(k)
+            if o is None:
+                out[k] = v
+            else:
+                o[0] += v[0]
+                o[1] += v[1]
+        return out
 
     def stop(self):
         self.running = False
@@ -520,10 +632,20 @@ class RealSource:
         except Exception:
             pass
         self._services = m
+        for _ct, info, _t in list(self._proc.values()):
+            info["services"] = m.get(info["pid"], [])
+
+    PROC_RECHECK = 10.0  # seconds before a cached PID is re-validated (guards against PID reuse)
 
     def proc_info(self, pid: int) -> dict:
+        """Called for every connection and flow, every second: must stay cheap. Opening the process
+        (psutil.Process + create_time) costs ~0.5 ms, far more for protected processes, so a cached
+        PID is only re-validated every PROC_RECHECK seconds."""
         self._refresh_services()
+        now = time.monotonic()
         cached = self._proc.get(pid)
+        if cached and now - cached[2] < self.PROC_RECHECK:
+            return cached[1]
         try:
             p = psutil.Process(pid)
             ct = p.create_time()
@@ -533,6 +655,7 @@ class RealSource:
         if cached and cached[0] == ct:
             info = cached[1]
             info["services"] = self._services.get(pid, [])
+            self._proc[pid] = (ct, info, now)
             return info
         name, exe, user = f"pid {pid}", None, None
         if pid == 4:
@@ -557,7 +680,7 @@ class RealSource:
             friendly = self._desc[exe]
         info = {"pid": pid, "name": name, "exe": exe, "friendly": friendly or _pretty(name),
                 "user": user, "services": self._services.get(pid, [])}
-        self._proc[pid] = (ct, info)
+        self._proc[pid] = (ct, info, now)
         if len(self._proc) > 4000:
             self._proc.clear()
         return info

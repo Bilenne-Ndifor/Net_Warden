@@ -10,6 +10,7 @@ import time
 import traceback
 from collections import deque
 
+from . import __version__
 from . import rules as R
 from .lockdown import MODES as LOCK_MODES
 from .lockdown import Lockdown
@@ -20,13 +21,15 @@ from .util import (DATA_DIR, IS_WINDOWS, RULE_PREFIX, JsonStore, classify_target
 
 DEFAULT_SETTINGS = {
     "ui_mode": "beginner",
-    "theme": "classic",             # "classic" (Windows 2000 look, default) or "modern"
+    "theme": "classic",             # "classic" (Windows 2000 look, default), "classic-dark" or "modern"
     "kill_on_block": True,          # reset open TCP connections when a block starts
     "instant_pause": True,          # use WinDivert to drop packets instantly during Pause internet
     "keep_rules_on_exit": False,    # leave firewall blocks in place when NetWarden closes
     "resolve_hostnames": True,
     "notify_new_apps": True,
+    "auto_update_check": True,      # look for a newer version on GitHub at start-up and twice a day
 }
+THEMES = ("classic", "classic-dark", "modern")
 MAX_IPS_PER_RULE = 100
 LOCK_PREFIX = RULE_PREFIX + "L_"
 
@@ -125,6 +128,8 @@ class Engine:
         self.started_at = time.time()
         self.last_enforce_error = None
         self._enf_lock = threading.Lock()
+        from .updater import Updater
+        self.updater = Updater(self)
         # drop timed rules that expired while we were closed
         t = time.time()
         before = len(self.rules_store.data["rules"])
@@ -162,7 +167,8 @@ class Engine:
         threading.Thread(target=self._monitor_loop, daemon=True, name="monitor").start()
         threading.Thread(target=self._enforce_loop, daemon=True, name="enforce").start()
         mode = "simulation (demo data)" if self.sim else "live"
-        self.log("info", f"NetWarden started in {mode} mode.")
+        self.log("info", f"NetWarden {__version__} started in {mode} mode.")
+        self.updater.start()
         if not self.sim and not self.src.per_app_bytes():
             self.log("warn", "Per-app traffic counting is off: " + (self.src.sniffer_error or "sniffer unavailable"))
 
@@ -170,6 +176,7 @@ class Engine:
         if not self.running:
             return
         self.running = False
+        self.updater.stop()
         try:
             self.usage.save()
             self.rules_store.save()
@@ -688,8 +695,8 @@ class Engine:
     def set_settings(self, data):
         if "ui_mode" in data and data["ui_mode"] != self.settings.get("ui_mode"):
             self.lockdown.pending.clear()  # requests are per app (Beginner) or per address (Pro)
-        if "theme" in data and data["theme"] not in ("classic", "modern"):
-            raise ValueError("theme must be classic or modern")
+        if "theme" in data and data["theme"] not in THEMES:
+            raise ValueError("theme must be one of: " + ", ".join(THEMES))
         for k, v in data.items():
             if k in DEFAULT_SETTINGS:
                 self.settings[k] = type(DEFAULT_SETTINGS[k])(v)
@@ -727,6 +734,8 @@ class Engine:
             "per_app_bytes": self.src.per_app_bytes(),
             "sniffer_error": getattr(self.src, "sniffer_error", None),
             "settings": self.settings,
+            "version": __version__,
+            "update": self.updater.info(),
             "total": {k: round(v) for k, v in m.total.items()},
             "today": {"up": sysu["d"][0], "down": sysu["d"][1]},
             "month": {"up": sysu["m"][0], "down": sysu["m"][1]},

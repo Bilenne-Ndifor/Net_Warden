@@ -9,7 +9,7 @@ NetWarden is a network monitor and firewall for Windows. It shows what every app
 - **Limit** upload speed, or how much data an app may use per day or month.
 - **Runs in the background.** Once installed, it starts when you sign in, lives in the tray, and keeps enforcing your choices.
 
-Switch between the **Beginner** and **Pro** interfaces at the top right of the window. The **Theme** button switches between **Classic 2000**, the default (a Windows 2000 look with grey 3D windows, navy title bars and green-on-black meters), and **Modern dark**. The permission pop-up follows the theme too.
+Switch between the **Beginner** and **Pro** interfaces at the top right of the window. The **Theme** button switches between **Classic 2000**, the default (a Windows 2000 look with grey 3D windows, navy title bars and green-on-black meters), **Classic 2000 dark** (the same look with charcoal windows and light text), and **Modern dark**. The permission pop-up follows the theme too. Apps are shown with their own program icon; apps without one (such as Windows services) get a coloured letter tile.
 
 ## Install (recommended)
 
@@ -24,6 +24,20 @@ Switch between the **Beginner** and **Pro** interfaces at the top right of the w
 3. Look for the **shield icon** near the clock. Right-click it to switch modes, pause the internet, or quit. Click it to open the window.
 
 To **uninstall**, go to Settings → Apps → NetWarden → Uninstall. This restores Windows Firewall's normal settings and removes everything NetWarden added.
+
+## Updating
+
+**Installed copy (one click).** NetWarden checks GitHub for a newer version at start-up and twice a day. When there is one, a notice appears in the window: click **Install update**. You can also check yourself under **Pro → Settings → Updates**. The update downloads the new version, runs its installer quietly, and restarts NetWarden. Your rules, groups, settings and usage history are kept. Nothing is installed without your click, and you can turn the automatic check off in the same place. In block-all mode, NetWarden briefly allows only its own connection to GitHub while it checks or downloads.
+
+**Git clone.** Double-click **`update.bat`**. It runs `git pull` and then offers to install the new version on this PC.
+
+### Publishing a new version (maintainers)
+
+1. Commit your changes as usual.
+2. Run **`release.bat`** (or `powershell -File release.ps1 2.2.0 "what changed"`). It bumps `__version__` in `netwarden/__init__.py`, commits, tags `v2.2.0` and pushes to `main`.
+3. Installed copies offer the update within 12 hours, or right away with *Check now*.
+
+The version number lives only in `netwarden/__init__.py`. An update is offered when the number on GitHub's `main` branch is higher than the installed one, so pushing code without bumping it doesn't trigger updates.
 
 ## Run without installing
 
@@ -102,6 +116,8 @@ netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound
 Install NetWarden.bat        installer (-> installer\install.ps1, uninstall.ps1)
 run.bat / demo.bat / setup.bat
 cleanup.bat / cleanup.ps1    emergency undo
+update.bat                   git pull + reinstall (for a git clone)
+release.bat / release.ps1    publish a new version (bump, tag, push)
 netwarden/
   __main__.py   start-up, --background, --open launcher, single instance, logging
   engine.py     rules, timers, data caps, block-all policy, firewall/QoS reconcile
@@ -109,6 +125,8 @@ netwarden/
   agent.py      tray icon + permission pop-ups
   monitor.py    per-app / connection / endpoint statistics
   winapi.py     Windows Firewall, QoS, WinDivert, event-5157 watcher, TCP reset
+  updater.py    update check + one-click install from GitHub
+  icons.py      program icons for the window and pop-ups
   rules.py, dnsparse.py, server.py, sim.py, util.py
   web/          the window (Beginner + Pro)
 ```

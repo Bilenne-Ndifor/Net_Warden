@@ -86,7 +86,21 @@ function ago(ts) {
 const PALETTE = ["#38bdf8", "#f5a524", "#34d399", "#a78bfa", "#f472b6", "#60a5fa", "#fb923c", "#4ade80", "#e879f9", "#facc15", "#2dd4bf", "#f87171"];
 function color(s) { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; }
 function initials(name) { const w = String(name || "?").replace(/\.exe$/i, "").split(/[\s._-]+/).filter(Boolean); return ((w[0] || "?")[0] + (w[1] ? w[1][0] : "")).toUpperCase(); }
-const avatar = (a, cls = "avatar") => `<div class="${cls}" style="background:${color(a.name || a.friendly)}">${esc(initials(a.friendly || a.name))}</div>`;
+// App logo: the program's own icon (served by /api/icon); the coloured letters stay as the fallback
+// for programs without an icon, Windows services and demo mode.
+// Lists re-render every second, so remember which programs have an icon: known ones are drawn
+// as a logo straight away (no letter flash), known misses go straight to the letters.
+const NO_ICON = new Set(), HAS_ICON = new Set();
+window.nwIconFail = (img) => { NO_ICON.add(img.dataset.p); const p = img.parentElement; img.remove(); if (p) p.classList.remove("has-logo"); };
+window.nwIconOk = (img) => { HAS_ICON.add(img.dataset.p); if (img.parentElement) img.parentElement.classList.add("has-logo"); };
+function avatar(a, cls = "avatar") {
+  const exe = a.exe || a.path || a.app || "";
+  const k = lc(exe);
+  const letters = `<span>${esc(initials(a.friendly || a.name))}</span>`;
+  const useIcon = exe && /^[a-z]:[\\/]/i.test(exe) && !NO_ICON.has(k) && !S.data?.sim;
+  const img = useIcon ? `<img alt="" draggable="false" data-p="${esc(k)}" src="/api/icon?t=${encodeURIComponent(TOKEN)}&p=${encodeURIComponent(exe)}" onload="nwIconOk(this)" onerror="nwIconFail(this)">` : "";
+  return `<div class="${cls}${useIcon && HAS_ICON.has(k) ? " has-logo" : ""}" style="--av:${color(a.name || a.friendly)}">${letters}${img}</div>`;
+}
 const lc = (s) => String(s || "").toLowerCase();
 
 function spark(hist, w = 90, h = 24) {
@@ -190,11 +204,13 @@ document.addEventListener("click", (e) => {
 });
 const appByKey = (k) => (S.data?.apps || []).find((a) => a.key === k);
 
-const THEMES = { classic: "Classic 2000", modern: "Modern dark" };
+const THEMES = { classic: "Classic 2000", "classic-dark": "Classic 2000 dark", modern: "Modern dark" };
+const THEME_ORDER = ["classic", "classic-dark", "modern"];
 function applyTheme(t) {
   t = THEMES[t] ? t : "classic";
   S.theme = t;
-  document.body.classList.toggle("theme-classic", t === "classic");
+  document.body.classList.toggle("theme-classic", t === "classic" || t === "classic-dark");
+  document.body.classList.toggle("classic-dark", t === "classic-dark");
   document.body.classList.toggle("theme-modern", t === "modern");
   const b = $("#theme-btn"); if (b) b.textContent = "Theme: " + THEMES[t];
   try { localStorage.setItem("nw_theme", t); } catch (_) { /* ignore */ }
@@ -202,11 +218,20 @@ function applyTheme(t) {
 }
 try { applyTheme(localStorage.getItem("nw_theme") || "classic"); } catch (_) { applyTheme("classic"); }
 H.theme = () => {
-  const next = S.theme === "classic" ? "modern" : "classic";
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(S.theme) + 1) % THEME_ORDER.length];
   applyTheme(next);
   S.themeLocked = Date.now();
   api("POST", "/api/settings", { theme: next }).catch(() => {});
 };
+H.updCheck = async () => {
+  try {
+    const r = await api("POST", "/api/update/check");
+    toast(r.error ? "Update check: " + r.error : r.available ? `Version ${r.latest} is available` : `You have the latest version (${r.current})`, { err: !!r.error });
+  } catch (e) { toast(e.message, { err: true }); }
+  poll(true);
+};
+H.updInstall = () => { S.updDismissed = false; act(api("POST", "/api/update/install"), "Downloading the update… NetWarden restarts by itself."); };
+H.updDismiss = () => { S.updDismissed = true; renderHeader(); };
 H.mode = (d) => { S.mode = d.mode; api("POST", "/api/settings", { ui_mode: d.mode }).catch(() => {}); render(); };
 H.tab = (d) => { S.tab = d.tab; render(); };
 H.pauseAll = (d) => act(api("POST", "/api/pause", { minutes: d.min ? +d.min : null }),
@@ -407,7 +432,7 @@ H.addAllowed = () => {
   modal(`<header><h2>Choose your allowed apps</h2></header><div class="body">
     <p class="muted">Ticked apps can always connect, in every block-all mode.</p>
     <div style="display:grid;gap:4px;max-height:50vh;overflow:auto">${apps.map((a) => `<label style="display:flex;gap:10px;align-items:center;padding:6px 8px;border-radius:8px;background:var(--panel-2)">
-      <input type="checkbox" value="${esc(a.exe)}" data-name="${esc(a.name)}" ${inGroup.has(lc(a.exe)) ? "checked" : ""}>${avatar({ name: a.name, friendly: a.name }, "mini-av")}<span><b>${esc(a.name)}</b><div class="faint num" style="font-size:11px">${esc(a.exe)}</div></span></label>`).join("") || '<div class="empty">No apps seen yet.</div>'}</div>
+      <input type="checkbox" value="${esc(a.exe)}" data-name="${esc(a.name)}" ${inGroup.has(lc(a.exe)) ? "checked" : ""}>${avatar({ name: a.name, friendly: a.name, exe: a.exe }, "mini-av")}<span><b>${esc(a.name)}</b><div class="faint num" style="font-size:11px">${esc(a.exe)}</div></span></label>`).join("") || '<div class="empty">No apps seen yet.</div>'}</div>
     <div class="field" style="margin-top:12px"><label>Or add a program by its full path</label><input class="input num" id="aa-path" placeholder="C:\\Program Files\\App\\app.exe"></div>
   </div><footer><button class="btn" data-act="close">Cancel</button><button class="btn primary" id="aa-save">Save</button></footer>`, {
     onMount(m) {
@@ -573,7 +598,14 @@ function renderHeader() {
   else if (!d.admin) { pill.className = "pill warn"; pill.textContent = "Monitor only — not Administrator"; }
   else { pill.className = "pill ok"; pill.textContent = active ? `Protecting · ${active} rule${active > 1 ? "s" : ""} active` : "Watching · no blocks"; }
   let n = "";
-  if (S.failures > 2) n += `<div class="notice">Lost contact with NetWarden. Is the NetWarden window (console) still open? Retrying…</div>`;
+  const up = d.update || {};
+  if (up.busy && up.busy !== "checking") S.updating = true;
+  if (S.failures > 2) n += S.updating ? `<div class="notice info">NetWarden is updating. It restarts by itself and opens a new window, so you can close this one.</div>`
+    : `<div class="notice">Lost contact with NetWarden. Is the NetWarden window (console) still open? Retrying…</div>`;
+  else if (up.busy && up.busy !== "checking") n += `<div class="notice info">Updating NetWarden to ${esc(up.latest)}: ${esc(up.busy)}… It restarts by itself in a moment.</div>`;
+  else if (up.available && !S.updDismissed) n += `<div class="notice info">NetWarden ${esc(up.latest)} is available (you have ${esc(up.current)}).
+    ${up.can_install ? '<button class="btn sm primary" data-act="updInstall" style="margin-left:8px">Install update</button>' : up.installed ? "" : " This copy isn't installed: run <b>git pull</b> to update it."}
+    <button class="btn sm ghost" data-act="updDismiss">Later</button></div>`;
   if (d.sim) n += `<div class="notice info">Demo mode — the apps and traffic are simulated and nothing on your PC is changed. Start with <b>run.bat</b> on Windows for live monitoring.</div>`;
   if (!d.sim && !d.admin) n += `<div class="notice">NetWarden isn't running as Administrator, so it can watch but not block or limit. Close it and start it with <b>run.bat</b> (it asks for admin rights).</div>`;
   for (const w of (ld.warnings || [])) n += `<div class="notice">${esc(w)}${w.includes("turned off") ? ' <button class="btn sm" data-act="fwOn" style="margin-left:8px">Turn Windows Firewall on</button>' : ""}</div>`;
@@ -611,7 +643,7 @@ function beginnerUpdate() {
   for (const p of ld.pending) { const k = lc(p.app); if (!byApp.has(k)) byApp.set(k, { ...p, n: 0, all: [] }); const g = byApp.get(k); g.n += p.count; g.all.push(p); }
   setHTML($("#b-requests"), ld.mode === "ask" && byApp.size ? `<section class="card req-card"><h2>${byApp.size} app${byApp.size > 1 ? "s want" : " wants"} to connect</h2>
     <p class="sub">They're blocked until you decide. Allow the ones you trust.</p><div class="applist">${[...byApp.values()].map((g) => `<div class="approw req">
-      ${avatar({ name: g.app_name, friendly: g.app_name })}<div style="min-width:0"><div class="name">${esc(g.app_name)}</div><div class="what">Tried ${esc((g.dests || []).slice(0, 2).join(", "))} · ${g.n} attempt${g.n > 1 ? "s" : ""}</div></div>
+      ${avatar({ name: g.app_name, friendly: g.app_name, exe: g.app })}<div style="min-width:0"><div class="name">${esc(g.app_name)}</div><div class="what">Tried ${esc((g.dests || []).slice(0, 2).join(", "))} · ${g.n} attempt${g.n > 1 ? "s" : ""}</div></div>
       <div></div><div></div><div class="acts"><button class="btn" data-act="reqLater" data-id="${g.all[0].id}">Later</button><button class="btn danger" data-act="reqApp" data-action="deny" data-app="${esc(g.app)}" data-name="${esc(g.app_name)}">Block</button><button class="btn ok" data-act="reqApp" data-action="allow" data-app="${esc(g.app)}" data-name="${esc(g.app_name)}">Allow</button></div></div>`).join("")}</div></section>` : "");
   setHTML($("#b-modes"), modeCards(false));
   const showAllowed = ld.mode !== "off";
@@ -771,7 +803,7 @@ function proPerms(body, d) {
   const pend = ld.pending;
   const apps = knownApps();
   const dl = `<datalist id="known-apps">${apps.map((a) => `<option value="${esc(a.exe)}">${esc(a.name)}</option>`).join("")}</datalist>`;
-  const reqRows = pend.map((p) => `<tr><td>${avatar({ name: p.app_name, friendly: p.app_name }, "mini-av")}<b>${esc(p.app_name)}</b><div class="path num">${esc(p.app)}</div></td>
+  const reqRows = pend.map((p) => `<tr><td>${avatar({ name: p.app_name, friendly: p.app_name, exe: p.app }, "mini-av")}<b>${esc(p.app_name)}</b><div class="path num">${esc(p.app)}</div></td>
     <td class="num">${esc(p.ip)}</td><td>${esc(p.host || "—")}</td><td class="num">${p.proto.toUpperCase()} ${p.port}</td><td class="r num">${p.count}</td><td class="faint">${ago(p.first)}</td>
     <td class="acts"><span class="faint" style="font-size:11.5px">Allow</span><button class="btn sm ok" data-act="reqAnswer" data-id="${p.id}" data-action="allow" data-scope="address">Address</button>${p.host ? `<button class="btn sm ok" data-act="reqAnswer" data-id="${p.id}" data-action="allow" data-scope="domain">Domain</button>` : ""}<button class="btn sm ok" data-act="reqAnswer" data-id="${p.id}" data-action="allow" data-scope="app">App</button>
       <span class="faint" style="font-size:11.5px;margin-left:8px">Block</span><button class="btn sm danger" data-act="reqAnswer" data-id="${p.id}" data-action="deny" data-scope="address">Address</button><button class="btn sm danger" data-act="reqAnswer" data-id="${p.id}" data-action="deny" data-scope="app">App</button><button class="btn sm ghost" data-act="reqLater" data-id="${p.id}">Later</button></td></tr>`).join("");
@@ -923,7 +955,8 @@ function proSettings(body, d) {
     <div class="settings-row"><div class="t"><b>Reset usage counters</b><div>Sets today's and this month's data counts back to zero (data limits restart).</div></div><button class="btn" data-act="resetUsage">Reset</button></div>
     <div class="settings-row"><div class="t"><b>Remove all rules</b><div>Emergency undo: deletes every NetWarden rule and its firewall / QoS entries.</div></div><button class="btn danger" data-act="cleanup">Remove all</button></div>
     <div class="settings-row" style="border:0"><div class="t"><b>Quit NetWarden</b><div>Stops monitoring.</div></div><button class="btn danger" data-act="quit">Quit</button></div>
-    </div><div class="card"><h2 style="margin-bottom:10px">Engine</h2><div class="kv">
+    </div><div style="display:grid;gap:16px;align-content:start"><div class="card"><h2 style="margin-bottom:10px">Updates</h2>${updateCard(d)}</div>
+    <div class="card"><h2 style="margin-bottom:10px">Engine</h2><div class="kv">
       <div>Mode</div><div>${d.sim ? "Demo (simulated)" : "Live"}</div>
       <div>Administrator</div><div>${d.admin ? "Yes" : "No — monitor only"}</div>
       <div>Packet sniffer</div><div>${d.per_app_bytes ? "Running (WinDivert)" : esc(d.sniffer_error || "Off")}</div>
@@ -931,7 +964,27 @@ function proSettings(body, d) {
       <div>Firewall/QoS entries</div><div class="num">${d.applied ?? 0}</div>
       <div>Unattributed</div><div class="num">↓ ${fmtB(d.unattributed?.down)} · ↑ ${fmtB(d.unattributed?.up)}</div>
       <div>Uptime</div><div class="num">${Math.floor(d.uptime / 60)} min</div>
-    </div><p class="faint" style="font-size:12px;margin-top:14px">Blocks use Windows Defender Firewall rules named <span class="num">NetWarden_*</span>. Upload limits use Windows QoS policies. If anything ever gets stuck, run <span class="num">cleanup.bat</span>.</p></div></div>`);
+    </div><p class="faint" style="font-size:12px;margin-top:14px">Blocks use Windows Defender Firewall rules named <span class="num">NetWarden_*</span>. Upload limits use Windows QoS policies. If anything ever gets stuck, run <span class="num">cleanup.bat</span>.</p></div></div></div>`);
+}
+
+function updateCard(d) {
+  const u = d.update || {};
+  const status = d.sim ? "Not checked in demo mode"
+    : u.busy ? (u.busy === "checking" ? "Checking…" : `Updating: ${esc(u.busy)}…`)
+    : u.error ? `<span class="up">${esc(u.error)}</span>`
+    : u.available ? `<b style="color:var(--ok)">Version ${esc(u.latest)} is available</b>`
+    : u.latest ? "You have the latest version" : "Not checked yet";
+  const btn = u.can_install ? '<button class="btn primary" data-act="updInstall">Install update</button>'
+    : `<button class="btn" data-act="updCheck" ${d.sim || u.busy ? "disabled" : ""}>Check now</button>`;
+  return `<div class="kv">
+      <div>Installed version</div><div class="num">${esc(d.version || u.current || "?")}</div>
+      <div>Latest on GitHub</div><div class="num">${esc(u.latest || "—")}</div>
+      <div>Status</div><div>${status}</div>
+      <div>Last checked</div><div>${u.checked_at ? ago(u.checked_at) : "—"}</div>
+    </div>
+    <div class="settings-row" style="border:0;padding-left:0"><div class="t"><b>Check automatically</b><div>Looks for a new version at start-up and twice a day. Nothing installs without your click.</div></div><label class="switch"><input type="checkbox" data-act="setting" data-key="auto_update_check" ${d.settings.auto_update_check ? "checked" : ""}><span></span></label></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">${btn}${u.can_install ? '<button class="btn" data-act="updCheck">Check again</button>' : ""}</div>
+    ${u.installed === false && !d.sim ? '<p class="faint" style="font-size:12px;margin-top:10px">This copy runs from a folder, not the installed one. Update it with <span class="num">git pull</span>, or run <span class="num">Install NetWarden.bat</span> to install.</p>' : ""}`;
 }
 
 // ------------------------------------------------------------------ render loop
@@ -975,8 +1028,10 @@ async function poll(now) {
   }
   inflight = false;
   clearTimeout(pollTimer);
-  pollTimer = setTimeout(poll, 1000);
+  // Minimized / hidden window: poll slowly so NetWarden stays light in the background.
+  pollTimer = setTimeout(poll, document.hidden ? 5000 : 1000);
 }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(true); });
 window.addEventListener("unhandledrejection", (e) => { e.preventDefault(); });
 window.addEventListener("resize", () => { const c = $("#chart"); if (c && S.data) drawChart(c, S.data.history); });
 poll();

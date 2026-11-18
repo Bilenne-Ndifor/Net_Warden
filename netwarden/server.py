@@ -52,6 +52,25 @@ def make_server(engine, port: int, token: str, on_quit, on_open=None):
                 return False
             return True
 
+        def _icon(self, q):
+            # <img> can't send headers, so this one endpoint takes the token in the query string
+            if q.get("t", [""])[0] != token:
+                return self.send_error(401)
+            from .icons import icon_png
+            png = icon_png(q.get("p", [""])[0])
+            if not png:
+                self.send_response(404)
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.send_header("Content-Length", str(len(png)))
+            self.end_headers()
+            self.wfile.write(png)
+
         # ---------------------------------------------------------------- GET
         def do_GET(self):
             if not self._host_ok():
@@ -59,6 +78,8 @@ def make_server(engine, port: int, token: str, on_quit, on_open=None):
             u = urlparse(self.path)
             if u.path == "/api/hello":  # unauthenticated: lets the Start-menu launcher find us
                 return self._json({"app": "NetWarden"})
+            if u.path == "/api/icon":
+                return self._icon(parse_qs(u.query))
             if u.path.startswith("/api/"):
                 if not self._auth():
                     return self._json({"error": "bad token"}, 401)
@@ -112,6 +133,10 @@ def make_server(engine, port: int, token: str, on_quit, on_open=None):
                 if p == "/api/cleanup":
                     engine.cleanup_all()
                     return self._json({"ok": True})
+                if p == "/api/update/check":
+                    return self._json(engine.updater.check())
+                if p == "/api/update/install":
+                    return self._json(engine.updater.install_async())
                 if p == "/api/usage/reset":
                     engine.usage.reset(b.get("key"))
                     return self._json({"ok": True})

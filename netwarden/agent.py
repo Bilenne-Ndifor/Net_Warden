@@ -141,15 +141,21 @@ class Agent:
         self.popup_ids = []
 
     def _palette(self):
-        if self.engine.settings.get("theme", "classic") == "classic":
-            return {"classic": True, "frame": "#d4d0c8", "bg": "#d4d0c8", "panel": "#ffffff", "text": "#000000",
-                    "muted": "#3c3c3c", "accent": "#0a246a", "warn": "#7a1010", "title_bg": "#0a246a",
-                    "title_fg": "#ffffff", "font": "Tahoma", "bold": ("Tahoma", 11, "bold"),
-                    "btn": {"block": ("#d4d0c8", "#a00000"), "later": ("#d4d0c8", "#000000"),
-                            "allow": ("#d4d0c8", "#000000")}}
-        return {"classic": False, "frame": LINE, "bg": BG, "panel": PANEL, "text": TEXT, "muted": MUTED,
-                "accent": DOWN, "warn": UP, "title_bg": BG, "title_fg": MUTED, "font": "Segoe UI",
-                "bold": ("Segoe UI Semibold", 12),
+        theme = self.engine.settings.get("theme", "classic")
+        if theme in ("classic", "classic-dark"):
+            if theme == "classic-dark":
+                face, text, muted, bad, link, panel = "#3a3936", "#ebe9e3", "#b3b0a7", "#ff8080", "#8fb3ff", "#1c1c1b"
+                hl, dk, warn, accent = "#67655f", "#0b0b0a", "#e6c45c", "#8fb3ff"
+            else:
+                face, text, muted, bad, link, panel = "#d4d0c8", "#000000", "#3c3c3c", "#a00000", "#0000ee", "#ffffff"
+                hl, dk, warn, accent = "#ffffff", "#404040", "#7a1010", "#0a246a"
+            return {"classic": True, "frame": face, "bg": face, "face": face, "panel": panel, "text": text,
+                    "muted": muted, "accent": accent, "warn": warn, "title_bg": "#0a246a", "title_fg": "#ffffff",
+                    "hl": hl, "dk": dk, "link": link, "font": "Tahoma", "bold": ("Tahoma", 11, "bold"),
+                    "btn": {"block": (face, bad), "later": (face, text), "allow": (face, text)}}
+        return {"classic": False, "frame": LINE, "bg": BG, "face": PANEL, "panel": PANEL, "text": TEXT, "muted": MUTED,
+                "accent": DOWN, "warn": UP, "title_bg": BG, "title_fg": MUTED, "hl": LINE, "dk": BG, "link": DOWN,
+                "font": "Segoe UI", "bold": ("Segoe UI Semibold", 12),
                 "btn": {"block": ("#3a1416", "#ffd4d4"), "later": (PANEL, MUTED), "allow": ("#0e3a52", "#d5f0ff")}}
 
     def _show_popup(self, group, apps_waiting):
@@ -175,8 +181,8 @@ class Agent:
             bar.pack(fill="x", padx=2, pady=2)
             tk.Label(bar, text=" NetWarden - Permission Needed", fg=P["title_fg"], bg=P["title_bg"],
                      font=(F, 9, "bold")).pack(side="left", pady=2)
-            xb = tk.Button(bar, text="x", font=(F, 7, "bold"), width=2, bd=2, relief="raised", bg="#d4d0c8",
-                           activebackground="#d4d0c8", padx=0, pady=0, command=lambda: self._later(group))
+            xb = tk.Button(bar, text="x", font=(F, 7, "bold"), width=2, bd=2, relief="raised", bg=P["face"],
+                           fg=P["text"], activebackground=P["face"], activeforeground=P["text"], padx=0, pady=0, command=lambda: self._later(group))
             xb.pack(side="right", padx=2, pady=2)
             if apps_waiting > 1:
                 tk.Label(bar, text=f"{apps_waiting} apps waiting ", fg="#dfe8f5", bg=P["title_bg"],
@@ -198,13 +204,18 @@ class Agent:
         row.pack(fill="x")
         av = tk.Canvas(row, width=40, height=40, bg=P["bg"], highlightthickness=0)
         col = AV_COLORS[sum(map(ord, p["app_name"])) % len(AV_COLORS)]
-        if classic:
-            av.create_rectangle(0, 0, 39, 39, fill=col, outline="#404040")
-            av.create_line(1, 38, 1, 1, 38, 1, fill="#ffffff")
+        logo = self._app_logo(p["app"])
+        if logo is not None:
+            w._logo = logo  # Tk drops images that Python no longer references
+            av.create_image(20, 20, image=logo)
         else:
-            av.create_rectangle(0, 0, 40, 40, fill=col, outline=col)
-        av.create_text(20, 20, text=_initials(p["app_name"]), fill="#000000" if classic else BG,
-                       font=(F, 12, "bold"))
+            if classic:
+                av.create_rectangle(0, 0, 39, 39, fill=col, outline=P["dk"])
+                av.create_line(1, 38, 1, 1, 38, 1, fill=P["hl"])
+            else:
+                av.create_rectangle(0, 0, 40, 40, fill=col, outline=col)
+            av.create_text(20, 20, text=_initials(p["app_name"]), fill="#000000" if classic else BG,
+                           font=(F, 12, "bold"))
         av.pack(side="left", padx=(0, 12))
         info = tk.Frame(row, bg=P["bg"])
         info.pack(side="left", fill="x", expand=True)
@@ -260,7 +271,7 @@ class Agent:
         mk("block", "Block", lambda: self._answer(group, "deny", scope.get(), hour.get())).pack(side="left")
         mk("later", "Later", lambda: self._later(group)).pack(side="left", padx=8)
         mk("allow", "Allow", lambda: self._answer(group, "allow", scope.get(), hour.get())).pack(side="right")
-        link = tk.Label(body, text="Open NetWarden", fg="#0000ee" if classic else DOWN, bg=P["bg"],
+        link = tk.Label(body, text="Open NetWarden", fg=P["link"], bg=P["bg"],
                         font=(F, 8, "underline"), cursor="hand2")
         link.pack(anchor="w", pady=(8, 0))
         link.bind("<Button-1>", lambda e: self.open_ui())
@@ -279,6 +290,22 @@ class Agent:
             winsound.MessageBeep(0x40)
         except Exception:
             pass
+
+    def _app_logo(self, path):
+        """The program's own icon as a Tk image (40 px), or None to fall back to the letters."""
+        try:
+            from PIL import Image, ImageTk
+            from .icons import icon_png
+            import io
+            png = icon_png(path)
+            if not png:
+                return None
+            img = Image.open(io.BytesIO(png)).convert("RGBA")
+            if img.size != (40, 40):
+                img = img.resize((40, 40), Image.LANCZOS)
+            return ImageTk.PhotoImage(img, master=self.root)
+        except Exception:
+            return None
 
     def _answer(self, group, action, scope, one_hour):
         ld = self.engine.lockdown

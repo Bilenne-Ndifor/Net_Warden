@@ -4,18 +4,26 @@
 # - registers a logon task that starts NetWarden in the background with admin rights (no UAC prompt)
 # - adds Start-menu + desktop shortcuts and an "Apps & features" entry (uninstall)
 # Run through "Install NetWarden.bat".
+#
+# -Update: unattended mode used by NetWarden's own updater (no prompts, output to -LogFile).
+param([switch]$Update, [string]$LogFile = "")
 
 $ErrorActionPreference = "Continue"   # native tools write to stderr; failures are checked explicitly
 $ProgressPreference = "SilentlyContinue"
 $AppName = "NetWarden"
-$Version = "2.0.0"
 $Src = Split-Path -Parent $PSScriptRoot
+# single source of truth for the version: __version__ in netwarden\__init__.py
+$Version = "0.0.0"
+$m = Select-String -Path (Join-Path $Src "netwarden\__init__.py") -Pattern '__version__\s*=\s*"([0-9.]+)"' -ErrorAction SilentlyContinue
+if ($m) { $Version = $m.Matches[0].Groups[1].Value }
+if ($Update -and $LogFile) { try { Start-Transcript -Path $LogFile -Force | Out-Null } catch { } }
+function Pause-End { if (-not $Update) { Read-Host "Press Enter to close" | Out-Null } }
 $Dest = Join-Path $env:ProgramFiles $AppName
 $TaskName = $AppName
 
 function Say($msg, $color = "Gray") { Write-Host $msg -ForegroundColor $color }
 function Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
-function Fail($msg) { Write-Host ""; Write-Host "Install failed: $msg" -ForegroundColor Red; Read-Host "Press Enter to close"; exit 1 }
+function Fail($msg) { Write-Host ""; Write-Host "Install failed: $msg" -ForegroundColor Red; Pause-End; exit 1 }
 
 # ---------------------------------------------------------------- admin
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -32,7 +40,7 @@ if (-not $User) { $User = "$env:USERDOMAIN\$env:USERNAME" }
 Say "  For user: $User" DarkGray
 try {
     $admins = @(Get-LocalGroupMember -SID "S-1-5-32-544" -ErrorAction Stop | ForEach-Object { $_.Name })
-    if ($admins -and -not ($admins -contains $User)) {
+    if ($admins -and -not ($admins -contains $User) -and -not $Update) {
         Say "  WARNING: $User is not an administrator. NetWarden would start without admin rights and could only" Yellow
         Say "  watch traffic (no blocking, no block-all). Sign in with an administrator account to install it." Yellow
         $ans = Read-Host "  Continue anyway? (y/N)"
@@ -103,8 +111,9 @@ Step "Copying files to $Dest"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 $null = & robocopy (Join-Path $Src "netwarden") (Join-Path $Dest "netwarden") /MIR /XD __pycache__ /NFL /NDL /NJH /NJS /NP
 if ($LASTEXITCODE -ge 8) { Fail "copying files (robocopy code $LASTEXITCODE)" }
-foreach ($f in @("requirements.txt", "README.md", "cleanup.bat", "cleanup.ps1")) {
-    Copy-Item (Join-Path $Src $f) $Dest -Force
+foreach ($f in @("requirements.txt", "README.md", "LICENSE", "cleanup.bat", "cleanup.ps1")) {
+    $p = Join-Path $Src $f
+    if (Test-Path $p) { Copy-Item $p $Dest -Force }
 }
 Copy-Item (Join-Path $PSScriptRoot "uninstall.ps1") $Dest -Force
 $DataDir = Join-Path $Dest "data"
@@ -211,7 +220,12 @@ if ($port) {
 }
 
 Write-Host ""
-Write-Host "  Installed. NetWarden now starts by itself every time you sign in." -ForegroundColor Green
-Write-Host "  Open it from the Start menu / desktop, or the tray icon. Uninstall from Settings > Apps." -ForegroundColor Green
-Write-Host ""
-Read-Host "Press Enter to close"
+if ($Update) {
+    Write-Host "  Updated to NetWarden $Version." -ForegroundColor Green
+    try { Stop-Transcript | Out-Null } catch { }
+} else {
+    Write-Host "  Installed NetWarden $Version. It now starts by itself every time you sign in." -ForegroundColor Green
+    Write-Host "  Open it from the Start menu / desktop, or the tray icon. Uninstall from Settings > Apps." -ForegroundColor Green
+    Write-Host ""
+    Pause-End
+}
